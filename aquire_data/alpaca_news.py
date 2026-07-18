@@ -23,26 +23,26 @@ def get_news():
     news = client.get_news(request_params)
 
     # convert to dataframe
-    return news.df
+    return news.df # type: ignore
 
 def get_all_news(tickers : list[str], start, end):
     client = NewsClient(api_key=API_KEY, secret_key=SECRET_KEY)
 
     if isinstance(tickers, list):
-        tickers = ",".join(tickers)
+        tickers = ",".join(tickers) # type: ignore
 
     request_params = NewsRequest(
-        symbols=tickers,
+        symbols=tickers, # type: ignore
         start=start,
         end=end
     )
 
     news = client.get_news(request_params)
 
-    if not news.data:
+    if not news.data: # type: ignore
         return pd.DataFrame()
 
-    return news.df
+    return news.df # type: ignore
 
 
 def preprocess_news(df: pd.DataFrame) -> pd.DataFrame:
