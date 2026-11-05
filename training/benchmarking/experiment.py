@@ -113,12 +113,15 @@ def run_experiment(
         fitted_model = clone(model)
         fitted_model.fit(X_train, train[target_columns[0]])
         predictions = np.asarray(fitted_model.predict(X_test)).reshape(-1, 1)
+        train_predictions = np.asarray(fitted_model.predict(X_train)).reshape(-1, 1)
     else:
         fitted_model = MultiOutputRegressor(clone(model))
         fitted_model.fit(X_train, train[target_columns])
         predictions = np.asarray(fitted_model.predict(X_test))
+        train_predictions = np.asarray(fitted_model.predict(X_train))
 
     prediction_data = {"date": test["date"].to_numpy()}
+    train_prediction_data = {"date": train["date"].to_numpy()}
     metrics = {}
 
     for index, horizon in enumerate(horizons):
@@ -129,6 +132,8 @@ def run_experiment(
         prediction_data[f"actual_{horizon}d"] = actual
         prediction_data[f"predicted_{horizon}d"] = predicted
         prediction_data[f"baseline_{horizon}d"] = baseline
+        train_prediction_data[f"actual_{horizon}d"] = train[target_columns[index]].to_numpy()
+        train_prediction_data[f"predicted_{horizon}d"] = train_predictions[:, index]
         metrics[f"{horizon}d"] = {
             "mae": mean_absolute_error(actual, predicted),
             "rmse": np.sqrt(mean_squared_error(actual, predicted)),
@@ -141,6 +146,7 @@ def run_experiment(
     return {
         "metrics": metrics,
         "predictions": pd.DataFrame(prediction_data),
+        "train_predictions": pd.DataFrame(train_prediction_data),
         "model": fitted_model,
         "features": feature_columns,
         "horizons": horizons,
