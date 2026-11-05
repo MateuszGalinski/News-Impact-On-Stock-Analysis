@@ -13,12 +13,14 @@ import json
 import os
 import time
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
 import pandas as pd
 from openai import OpenAI
 
 MODEL = "gpt-5-mini"  # swap to "gpt-5-mini" if nano's judgments look too shallow on your validation sample
-CACHE_PATH = "news_features_cache.jsonl"
+# Anchored to this file so the same cache is found from any working directory.
+CACHE_PATH = Path(__file__).resolve().parents[1] / "notebooks" / "news_features_cache.jsonl"
 
 SYSTEM_PROMPT = """You are a financial news analyst. You will be given one \
 or more news articles about NVIDIA (NVDA) published on a single day. \
@@ -202,7 +204,19 @@ def extract_daily_news_features(
               f"event={result.get('event_type')} "
               f"materiality={result.get('event_materiality'):.2f}")
 
+    return _cache_to_frame(cache)
+
+
+def _cache_to_frame(cache: dict[str, dict]) -> pd.DataFrame:
     daily_features = pd.DataFrame(cache.values())
     daily_features["date"] = pd.to_datetime(daily_features["date"])
     daily_features = daily_features.sort_values("date").reset_index(drop=True)
     return daily_features
+
+
+def load_cached_daily_news_features() -> pd.DataFrame:
+    """Return the already-scored days without creating a client or calling the API."""
+    cache = _load_cache()
+    if not cache:
+        raise FileNotFoundError(f"No cached news features found at {CACHE_PATH}")
+    return _cache_to_frame(cache)
