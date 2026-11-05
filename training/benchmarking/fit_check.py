@@ -16,7 +16,8 @@ from collections.abc import Mapping
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.metrics import mean_squared_error, r2_score
+
+from .metrics import score_predictions
 
 ACTUAL_COLOR = "#2a78d6"
 FITTED_COLOR = "#eb6834"
@@ -25,12 +26,17 @@ PRIMARY_INK = "#0b0b0b"
 SECONDARY_INK = "#52514e"
 GRID_COLOR = "#e1e0d9"
 AXIS_COLOR = "#c3c2b7"
-
-
-def _correlation(actual: np.ndarray, predicted: np.ndarray) -> float:
-    if np.std(actual) == 0 or np.std(predicted) == 0:
-        return float("nan")
-    return float(np.corrcoef(actual, predicted)[0, 1])
+CHART_STYLE = {
+    "figure.facecolor": SURFACE_COLOR,
+    "axes.facecolor": SURFACE_COLOR,
+    "axes.edgecolor": AXIS_COLOR,
+    "axes.labelcolor": SECONDARY_INK,
+    "axes.titlecolor": PRIMARY_INK,
+    "xtick.color": SECONDARY_INK,
+    "ytick.color": SECONDARY_INK,
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Segoe UI", "DejaVu Sans"],
+}
 
 
 def training_fit_summary(actual, predictions: Mapping) -> pd.DataFrame:
@@ -41,20 +47,10 @@ def training_fit_summary(actual, predictions: Mapping) -> pd.DataFrame:
 
     rows = {}
     for name, predicted in predictions.items():
-        predicted = np.ravel(predicted)
-        if len(predicted) != len(actual):
-            raise ValueError(
-                f"{name}: got {len(predicted)} predictions for {len(actual)} actual values"
-            )
-        rows[name] = {
-            "mse": mean_squared_error(actual, predicted),
-            "baseline_mse": mean_squared_error(actual, np.full(len(actual), actual.mean())),
-            "r2": r2_score(actual, predicted),
-            "correlation": _correlation(actual, predicted),
-            "spread_ratio": predicted.std() / actual.std() if actual.std() else float("nan"),
-            "directional_accuracy": np.mean((predicted > 0) == (actual > 0)),
-            "always_up_accuracy": np.mean(actual > 0),
-        }
+        try:
+            rows[name] = score_predictions(actual, predicted, actual.mean())
+        except ValueError as error:
+            raise ValueError(f"{name}: {error}") from error
     return pd.DataFrame.from_dict(rows, orient="index")
 
 
@@ -88,19 +84,7 @@ def plot_training_fit(
             raise ValueError(f"got {len(x)} dates for {len(actual)} actual values")
 
     zoom_start = max(0, len(actual) - zoom_days)
-    style = {
-        "figure.facecolor": SURFACE_COLOR,
-        "axes.facecolor": SURFACE_COLOR,
-        "axes.edgecolor": AXIS_COLOR,
-        "axes.labelcolor": SECONDARY_INK,
-        "axes.titlecolor": PRIMARY_INK,
-        "xtick.color": SECONDARY_INK,
-        "ytick.color": SECONDARY_INK,
-        "font.family": "sans-serif",
-        "font.sans-serif": ["Segoe UI", "DejaVu Sans"],
-    }
-
-    with plt.rc_context(style):
+    with plt.rc_context(CHART_STYLE):
         fig, axes = plt.subplots(
             len(predictions),
             2,
@@ -153,19 +137,28 @@ def plot_training_fit(
     return summary
 
 
-def plot_experiment_training_fit(result: dict, zoom_days: int = 100) -> pd.DataFrame:
-    """Run the training-fit check on a `run_experiment` result, one figure per horizon."""
-    frame = result["train_predictions"]
+def plot_experiment_training_fit(result: dict, seed: int | None = None, zoom_days: int = 100) -> pd.DataFrame:
+    """Run the training-fit check on a `run_experiment` result, one figure per horizon.
+
+    Uses the first seed in the experiment unless `seed` is given.
+    """
+    config = result["config"]
+    seed = config.seeds[0] if seed is None else seed
+    predictions = result["predictions"]
+    rows = predictions[(predictions["split"] == "train") & (predictions["seed"] == seed)]
+    if rows.empty:
+        raise ValueError(f"No training predictions for seed {seed}")
+
     summaries = []
-    for horizon in result["horizons"]:
-        name = f"{horizon}d"
-        summaries.append(
-            plot_training_fit(
-                frame[f"actual_{name}"],
-                {name: frame[f"predicted_{name}"]},
-                dates=frame["date"],
-                title=f"Fit on training data: {horizon}-day cumulative log return",
-                zoom_days=zoom_days,
-            )
+    for horizon, by_horizon in rows.groupby("horizon"):
+        by_model = dict(tuple(by_horizon.groupby("model", sort=False)))
+        first = next(iter(by_model.values()))
+        summary = plot_training_fit(
+            first["actual"],
+            {name: frame["predicted"] for name, frame in by_model.items()},
+            dates=first["date"],
+            title=f"Fit on training data: {horizon}-day cumulative log return",
+            zoom_days=zoom_days,
         )
+        summaries.append(summary.assign(horizon=horizon))
     return pd.concat(summaries)

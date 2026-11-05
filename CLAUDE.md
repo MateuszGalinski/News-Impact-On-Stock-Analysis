@@ -56,7 +56,13 @@ Two more approaches are planned in `README.md` but don't exist yet: `news_featur
 
 The real code is in each track's `notebooks/training_exploration.ipynb`, and shared logic such as `make_windows` is copied between notebooks rather than imported. These files are empty placeholders: every track's `model.py` and `training/preprocessing/__init__.py`.
 
-`training/benchmarking/experiment.py` (`run_experiment`) is a newer, untracked sklearn-style harness that no notebook uses yet. It differs from the notebooks: an 80/20 split, only `previous_return` and `news_count` as features, and multi-horizon targets.
+`training/benchmarking/` holds a shared pipeline for comparing variants: `data.py` builds each track's features and windows, `models.py` defines the models, and `experiment.py` has `run_experiment(ExperimentConfig(...))`, which only scores the test split with `evaluate_test=True`. No notebook uses it yet.
+
+After changing the pipeline's data or default model behaviour, confirm it still reproduces the notebooks (no API calls or cost):
+
+```powershell
+python -m training.benchmarking.check_notebook_match
+```
 
 ### Conventions shared by the notebooks
 
@@ -82,9 +88,8 @@ The one-day shift and the after-close roll are what prevent look-ahead leakage, 
 
 ### LLM cache
 
-LLM calls cost real money, so results are cached in `news_features_cache.jsonl`, which is committed to git.
+LLM calls cost real money, so results are cached in `news_with_feature_engineering/notebooks/news_features_cache.jsonl`, which is committed to git. `run_experiment` only reads this cache and never calls the API.
 
-- `CACHE_PATH` is relative, so the cache only resolves when the working directory is `news_with_feature_engineering/notebooks/`. From anywhere else, a new empty cache is created and every day is re-scored and billed.
 - The cache key is the date alone. Changing `MODEL`, `SYSTEM_PROMPT`, the schema, or the ticker does not invalidate it, so stale rows get reused unless you move or delete the file. The prompt is also hardcoded to NVDA.
 - `extract_daily_news_features` returns everything in the cache, not just the dates in the input frame.
 - `OpenAI()` is constructed before the cache is checked, so `OPENAI_API_KEY` must be set even on a fully cached run. The notebook doesn't call `load_dotenv`, so the key has to already be in the environment.

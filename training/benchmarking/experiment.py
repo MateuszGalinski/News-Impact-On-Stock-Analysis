@@ -1,153 +1,95 @@
-import numpy as np
+from dataclasses import dataclass
+
 import pandas as pd
-from sklearn.base import clone
-from sklearn.metrics import mean_absolute_error, mean_squared_error
-from sklearn.multioutput import MultiOutputRegressor
+
+from .data import prepare_dataset
+from .metrics import score_predictions
+from .models import NOTEBOOK_MODELS, ModelSpec, fit_model
 
 
-def run_experiment(
-    stock: pd.DataFrame,
-    news: pd.DataFrame | None = None,
-    *,
-    model,
-    use_news: bool = True,
-    horizons: tuple[int, ...] = (1, 2, 3),
-    test_fraction: float = 0.2,
-) -> dict:
-    """Train and evaluate a return-prediction model using a chronological split.
+@dataclass(frozen=True)
+class ExperimentConfig:
+    """One experiment. `models` defaults to the track's notebook models."""
 
-    Required columns:
-      stock: date, close
-      news: published_at (when use_news=True)
+    track: str
+    models: tuple[ModelSpec, ...] | None = None
+    horizons: tuple[int, ...] = (1, 2, 3)
+    window_days: int = 30
+    seeds: tuple[int, ...] = (42,)
+    train_fraction: float = 0.8
+    validation_fraction: float = 0.1
 
-    Each target is the cumulative log return from the row's close to the
-    close `horizon` stock sessions later.
 
-    The last `max(horizons) - 1` rows before the split are dropped from training,
-    because their targets use closes from the test period.
+def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> dict:
+    """Train every model and seed in `config`, then score them.
 
-    Metrics for each horizon cover the model and a train-mean baseline, plus
-    directional accuracy compared with always predicting an up move.
+    The test split stays untouched unless `evaluate_test=True`, so tuning
+    decisions can't be based on it. Keep that for the final comparison.
+
+    Each target is the cumulative log return over `horizon` days. Each split
+    builds its own windows, so no training target uses a later split's prices.
+
+    Returns:
+        metrics: one row per model, seed, split and horizon.
+        predictions: one row per model, seed, split, horizon and date.
+        models: fitted models keyed by (model name, seed).
+        dataset: the windows used, without test results.
     """
-    if not 0 < test_fraction < 1:
-        raise ValueError("test_fraction must be between 0 and 1")
-
-    if not horizons or any(h <= 0 for h in horizons):
-        raise ValueError("horizons must contain positive integers")
-    if len(set(horizons)) != len(horizons):
-        raise ValueError("horizons must not contain duplicates")
-
-    required_stock_columns = {"date", "close"}
-    missing_stock_columns = required_stock_columns - set(stock.columns)
-    if missing_stock_columns:
-        raise ValueError(f"stock is missing columns: {sorted(missing_stock_columns)}")
-
-    data = stock[["date", "close"]].copy()
-    data["date"] = pd.to_datetime(data["date"], errors="raise").dt.normalize()
-    data["close"] = pd.to_numeric(data["close"], errors="raise")
-    data = (
-        data.sort_values("date")
-        .drop_duplicates(subset="date", keep="last")
-        .reset_index(drop=True)
+    dataset = prepare_dataset(
+        config.track,
+        horizons=config.horizons,
+        window_days=config.window_days,
+        train_fraction=config.train_fraction,
+        validation_fraction=config.validation_fraction,
     )
+    specs = config.models if config.models is not None else NOTEBOOK_MODELS[config.track]
 
-    if data.empty:
-        raise ValueError("stock contains no rows")
-    if data["close"].isna().any() or (data["close"] <= 0).any():
-        raise ValueError("stock close prices must be present and positive")
+    splits = {"train": dataset.train, "validation": dataset.validation}
+    if evaluate_test:
+        splits["test"] = dataset.test
 
-    if use_news:
-        if news is None:
-            raise ValueError("news is required when use_news=True")
-        if "published_at" not in news.columns:
-            raise ValueError("news must contain a 'published_at' column")
+    metric_rows = []
+    prediction_frames = []
+    fitted_models = {}
 
-        published_dates = (
-            pd.to_datetime(news["published_at"], errors="raise")
-            .dt.normalize()
-            .to_numpy(dtype="datetime64[ns]")
-        )
-        sessions = data["date"].to_numpy(dtype="datetime64[ns]")
+    for spec in specs:
+        for seed in config.seeds:
+            fitted = fit_model(spec, dataset, seed)
+            fitted_models[(spec.name, seed)] = fitted
 
-        # Attribute each article to the next stock session, so news from a
-        # given date cannot be used to predict that same date's return.
-        session_positions = np.searchsorted(sessions, published_dates, side="right")
-        session_positions = session_positions[session_positions < len(data)]
-        counts = pd.Series(session_positions).value_counts()
-
-        data["news_count"] = (
-            pd.Series(np.arange(len(data)))
-            .map(counts)
-            .fillna(0)
-            .to_numpy()
-        )
-
-    data["previous_return"] = np.log(data["close"] / data["close"].shift(1))
-
-    target_columns = []
-    for horizon in horizons:
-        column = f"return_{horizon}d"
-        data[column] = np.log(data["close"].shift(-horizon) / data["close"])
-        target_columns.append(column)
-
-    feature_columns = ["previous_return"]
-    if use_news:
-        feature_columns.append("news_count")
-
-    data = data.dropna(subset=feature_columns + target_columns).reset_index(drop=True)
-
-    split_at = int(len(data) * (1 - test_fraction))
-    train_end = split_at - (max(horizons) - 1)
-    if train_end < 1 or split_at >= len(data):
-        raise ValueError(
-            "Not enough usable rows for the requested chronological split"
-        )
-
-    train = data.iloc[:train_end]
-    test = data.iloc[split_at:]
-
-    X_train = train[feature_columns]
-    X_test = test[feature_columns]
-
-    if len(horizons) == 1:
-        fitted_model = clone(model)
-        fitted_model.fit(X_train, train[target_columns[0]])
-        predictions = np.asarray(fitted_model.predict(X_test)).reshape(-1, 1)
-        train_predictions = np.asarray(fitted_model.predict(X_train)).reshape(-1, 1)
-    else:
-        fitted_model = MultiOutputRegressor(clone(model))
-        fitted_model.fit(X_train, train[target_columns])
-        predictions = np.asarray(fitted_model.predict(X_test))
-        train_predictions = np.asarray(fitted_model.predict(X_train))
-
-    prediction_data = {"date": test["date"].to_numpy()}
-    train_prediction_data = {"date": train["date"].to_numpy()}
-    metrics = {}
-
-    for index, horizon in enumerate(horizons):
-        actual = test[target_columns[index]].to_numpy()
-        predicted = predictions[:, index]
-        baseline = np.full(len(actual), train[target_columns[index]].mean())
-
-        prediction_data[f"actual_{horizon}d"] = actual
-        prediction_data[f"predicted_{horizon}d"] = predicted
-        prediction_data[f"baseline_{horizon}d"] = baseline
-        train_prediction_data[f"actual_{horizon}d"] = train[target_columns[index]].to_numpy()
-        train_prediction_data[f"predicted_{horizon}d"] = train_predictions[:, index]
-        metrics[f"{horizon}d"] = {
-            "mae": mean_absolute_error(actual, predicted),
-            "rmse": np.sqrt(mean_squared_error(actual, predicted)),
-            "baseline_mae": mean_absolute_error(actual, baseline),
-            "baseline_rmse": np.sqrt(mean_squared_error(actual, baseline)),
-            "directional_accuracy": np.mean((predicted > 0) == (actual > 0)),
-            "always_up_accuracy": np.mean(actual > 0),
-        }
+            for split_name, split in splits.items():
+                predicted = fitted.predict(split.X)
+                for index, horizon in enumerate(config.horizons):
+                    baseline = dataset.train.y[:, index].mean()
+                    labels = {
+                        "track": config.track,
+                        "model": spec.name,
+                        "seed": seed,
+                        "split": split_name,
+                        "horizon": horizon,
+                    }
+                    metric_rows.append(
+                        {
+                            **labels,
+                            **score_predictions(split.y[:, index], predicted[:, index], baseline),
+                        }
+                    )
+                    prediction_frames.append(
+                        pd.DataFrame(
+                            {
+                                **labels,
+                                "date": split.dates,
+                                "actual": split.y[:, index],
+                                "predicted": predicted[:, index],
+                                "baseline": baseline,
+                            }
+                        )
+                    )
 
     return {
-        "metrics": metrics,
-        "predictions": pd.DataFrame(prediction_data),
-        "train_predictions": pd.DataFrame(train_prediction_data),
-        "model": fitted_model,
-        "features": feature_columns,
-        "horizons": horizons,
+        "config": config,
+        "metrics": pd.DataFrame(metric_rows),
+        "predictions": pd.concat(prediction_frames, ignore_index=True),
+        "models": fitted_models,
+        "dataset": dataset,
     }
