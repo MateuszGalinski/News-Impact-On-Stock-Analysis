@@ -112,6 +112,100 @@ def _legend_handles(splits: list[str]) -> list:
     return handles
 
 
+def _forward_panels(frame: pd.DataFrame, height: float = 6.6):
+    tracks = _tracks_in(frame)
+    fig, axes = plt.subplots(
+        2, len(tracks), figsize=(13, height), sharex="row", squeeze=False, layout="constrained"
+    )
+    return fig, axes, tracks
+
+
+def plot_walk_forward_intervals(intervals: pd.DataFrame, title: str = "Walk-forward results, all scored days") -> None:
+    """Plot `walk_forward_intervals`, with a 95% interval around each estimate.
+
+    The top row shows out-of-sample R² against the train-mean baseline. The
+    bottom row shows directional accuracy against always-up. Right of the line
+    beats the baseline in both rows. An interval crossing the line means the
+    result can't be told apart from the baseline.
+    """
+    with plt.rc_context(CHART_STYLE):
+        fig, axes, tracks = _forward_panels(intervals)
+        always_up = 100 * intervals["always_up_accuracy"].iloc[0]
+        for column, track in zip(axes.T, tracks):
+            rows = intervals[intervals["track"] == track]
+            models = list(rows["model"])
+            for y, row in enumerate(rows.itertuples()):
+                column[0].plot(
+                    [row.oos_r2_lower, row.oos_r2_upper], [y, y], color=ACTUAL_COLOR, linewidth=2, zorder=2
+                )
+                column[0].scatter(
+                    row.oos_r2, y, s=56, color=ACTUAL_COLOR, edgecolors=SURFACE_COLOR, linewidths=1, zorder=3
+                )
+                column[1].plot(
+                    [always_up + row.direction_edge_lower, always_up + row.direction_edge_upper],
+                    [y, y],
+                    color=FITTED_COLOR,
+                    linewidth=2,
+                    zorder=2,
+                )
+                column[1].scatter(
+                    100 * row.directional_accuracy,
+                    y,
+                    s=56,
+                    color=FITTED_COLOR,
+                    edgecolors=SURFACE_COLOR,
+                    linewidths=1,
+                    zorder=3,
+                )
+            _style_panel(column[0], models)
+            _style_panel(column[1], models, reference_lines=(always_up,))
+            column[0].set_title(TRACK_TITLES.get(track, track), loc="left", fontsize=11)
+            column[0].set_xlabel("Out-of-sample R² (0 = train-mean baseline)")
+            column[1].set_xlabel(f"Directional accuracy, % (line = always-up, {always_up:.1f}%)")
+
+        fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        fig.legend(
+            handles=[
+                plt.Line2D([], [], color=SECONDARY_INK, marker="o", markersize=7, linewidth=2, label="Estimate with 95% interval"),
+            ],
+            loc="upper right", frameon=False, fontsize=10,
+        )
+        plt.show()
+
+
+def plot_walk_forward_rounds(round_metrics: pd.DataFrame, title: str = "Walk-forward results, round by round") -> None:
+    """Plot each round's score, averaged across seeds, to show how consistent a model is."""
+    rows = round_metrics.copy()
+    rows["direction_edge"] = 100 * (rows["directional_accuracy"] - rows["always_up_accuracy"])
+    rows = rows.groupby(["track", "model", "round"], sort=False, as_index=False)[["oos_r2", "direction_edge"]].mean()
+
+    with plt.rc_context(CHART_STYLE):
+        fig, axes, tracks = _forward_panels(rows)
+        for column, track in zip(axes.T, tracks):
+            track_rows = rows[rows["track"] == track]
+            models = list(track_rows["model"].unique())
+            for ax, metric, color in (
+                (column[0], "oos_r2", ACTUAL_COLOR),
+                (column[1], "direction_edge", FITTED_COLOR),
+            ):
+                for y, model in enumerate(models):
+                    _draw_row(ax, y, track_rows[track_rows["model"] == model][metric], color, None)
+                _style_panel(ax, models)
+            column[0].set_title(TRACK_TITLES.get(track, track), loc="left", fontsize=11)
+            column[0].set_xlabel("Out-of-sample R² (0 = train-mean baseline)")
+            column[1].set_xlabel("Directional accuracy minus always-up (points)")
+
+        fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        fig.legend(
+            handles=[
+                plt.Line2D([], [], linestyle="none", marker="o", markersize=7, color=SECONDARY_INK, label="One dot per round"),
+                plt.Line2D([], [], color=PRIMARY_INK, linewidth=1.5, label="Mean"),
+            ],
+            loc="upper right", ncols=2, frameon=False, fontsize=10,
+        )
+        plt.show()
+
+
 def plot_overfit_results(
     overfit: pd.DataFrame,
     r2_limits: tuple[float, float] = (-1, 1.05),

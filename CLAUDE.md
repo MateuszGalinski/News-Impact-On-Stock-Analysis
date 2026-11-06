@@ -52,11 +52,17 @@ Each folder under `training/` is one track, kept comparable to the others. The n
 | `no_news_with_feature_engineering` | Baseline plus technical indicators (`CLOSE_TO_TEMA_10`, `EMA_5_20_SPREAD`) |
 | `news_with_feature_engineering` | Baseline plus LLM-derived rolling news features |
 
-Two more approaches are planned in `README.md` but don't exist yet: `news_features_from_rag` and `news_shaped_based_rag`.
+Two more approaches are planned in `README.md` but don't exist yet: `news_features_from_rag` and `news_shaped_based_rag`. The agreed order of work is in `ROADMAP.md`.
 
 The real code is in each track's `notebooks/training_exploration.ipynb`, and shared logic such as `make_windows` is copied between notebooks rather than imported. These files are empty placeholders: every track's `model.py` and `training/preprocessing/__init__.py`.
 
 `training/benchmarking/` holds a shared pipeline for comparing variants: `data.py` builds each track's features and windows, `models.py` defines the models, and `experiment.py` has `run_experiment(ExperimentConfig(...))`, which only scores the test split with `evaluate_test=True`. `ExperimentConfig` can also limit every track to the news track's dates (`common_dates=True`) and standardize inputs and target using training rows only (`standardize=True`). Both are off by default to match the notebooks. Runs are compared in `notebooks/model_comparison.ipynb`, with results saved to `results/`.
+
+`walk_forward.py` is the evaluation to use for decisions: `run_walk_forward(WalkForwardConfig(...))` retrains over 8 rounds, never loads the locked test split, and can resume from its results file. Scored windows can use earlier days as inputs, but no training target reaches a scored day. The 80/10/10 split stays for `check_notebook_match` and the final test. After changing it, run:
+
+```powershell
+python -m training.benchmarking.check_walk_forward
+```
 
 After changing the pipeline's data or default model behaviour, confirm it still reproduces the notebooks (no API calls or cost):
 

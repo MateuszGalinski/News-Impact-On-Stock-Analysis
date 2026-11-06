@@ -208,6 +208,41 @@ def _standardize_inputs(split: WindowedSplit, scaler: StandardScaler, indices: l
     return replace(split, X=X)
 
 
+def load_track_rows(track: str, *, common_dates: bool = False) -> tuple[pd.DataFrame, list[str], list[str]]:
+    """Return a track's rows, feature columns, and columns to scale.
+
+    common_dates limits the track to the news track's dates, after indicators
+    have been calculated on the full price history.
+    """
+    frame, features, scaled = build_track_frame(track)
+    if common_dates and track != NEWS_WITH_FEATURES:
+        frame = _restrict_to_news_dates(frame)
+    return frame, features, scaled
+
+
+def split_sizes(row_count: int, train_fraction: float, validation_fraction: float) -> tuple[int, int]:
+    """Return the train and validation row counts. The remaining rows are the test split."""
+    return int(row_count * train_fraction), int(row_count * validation_fraction)
+
+
+def _standardize_all(
+    fit_rows: pd.DataFrame,
+    features: list[str],
+    scaled: list[str],
+    splits: list[WindowedSplit],
+) -> list[WindowedSplit]:
+    """Standardize input windows using `fit_rows` only.
+
+    Done after windowing because the return column also builds the targets.
+    Cyclical date features stay as they are because they're already between -1
+    and 1, and `scaled` columns have already been scaled.
+    """
+    columns = [c for c in features if c not in CYCLICAL_COLUMNS and c not in scaled]
+    indices = [features.index(column) for column in columns]
+    scaler = StandardScaler().fit(fit_rows[columns].to_numpy())
+    return [_standardize_inputs(split, scaler, indices) for split in splits]
+
+
 def make_windows(
     frame: pd.DataFrame,
     feature_columns: list[str],
@@ -266,12 +301,9 @@ def prepare_dataset(
     if train_fraction <= 0 or validation_fraction <= 0 or train_fraction + validation_fraction >= 1:
         raise ValueError("train and validation fractions must be positive and leave rows for test")
 
-    frame, features, scaled = build_track_frame(track)
-    if common_dates and track != NEWS_WITH_FEATURES:
-        frame = _restrict_to_news_dates(frame)
+    frame, features, scaled = load_track_rows(track, common_dates=common_dates)
 
-    train_size = int(len(frame) * train_fraction)
-    validation_size = int(len(frame) * validation_fraction)
+    train_size, validation_size = split_sizes(len(frame), train_fraction, validation_fraction)
     train = frame.iloc[:train_size].copy()
     validation = frame.iloc[train_size:train_size + validation_size].copy()
     test = frame.iloc[train_size + validation_size:].copy()
@@ -281,18 +313,14 @@ def prepare_dataset(
         for split in (train, validation, test):
             split[scaled] = scaler.transform(split[scaled])
 
-    # Standardized after windowing because the return column also builds the targets.
     train_windows = make_windows(train, features, window_days, horizons)
     validation_windows = make_windows(validation, features, window_days, horizons)
     test_windows = make_windows(test, features, window_days, horizons)
 
     if standardize:
-        columns = [c for c in features if c not in CYCLICAL_COLUMNS and c not in scaled]
-        indices = [features.index(column) for column in columns]
-        scaler = StandardScaler().fit(train[columns].to_numpy())
-        train_windows = _standardize_inputs(train_windows, scaler, indices)
-        validation_windows = _standardize_inputs(validation_windows, scaler, indices)
-        test_windows = _standardize_inputs(test_windows, scaler, indices)
+        train_windows, validation_windows, test_windows = _standardize_all(
+            train, features, scaled, [train_windows, validation_windows, test_windows]
+        )
 
     return Dataset(
         track=track,
@@ -301,5 +329,57 @@ def prepare_dataset(
         train=train_windows,
         validation=validation_windows,
         test=test_windows,
+        standardized=standardize,
+    )
+
+
+def prepare_walk_forward_round(
+    frame: pd.DataFrame,
+    features: list[str],
+    scaled: list[str],
+    *,
+    cutoff: int,
+    scored_end: int,
+    track: str,
+    horizons: tuple[int, ...] = (1,),
+    window_days: int = 30,
+    early_stopping_fraction: float = 0.1,
+    standardize: bool = True,
+) -> Dataset:
+    """Build one walk-forward round. Rows are in time order.
+
+    Rows before `cutoff` are known when the model trains, and `test` holds the
+    scored rows from `cutoff` to `scored_end`. The end of the known rows becomes
+    `validation`, the early stopping slice. Scaling is fit on the rows before it.
+
+    A window's targets always stay inside its own range, but its inputs can use
+    the previous `window_days` rows. Those days are known when the prediction
+    is made, so every scored row gets a prediction.
+    """
+    validation_start = cutoff - int(cutoff * early_stopping_fraction)
+    if validation_start < window_days or cutoff < window_days or scored_end <= cutoff:
+        raise ValueError(f"Invalid round: cutoff {cutoff}, scored_end {scored_end}")
+
+    rows = frame.iloc[:scored_end].copy()
+    if scaled:
+        scaler = StandardScaler().fit(rows.iloc[:validation_start][scaled])
+        rows[scaled] = scaler.transform(rows[scaled])
+    fit_rows = rows.iloc[:validation_start]
+
+    splits = [
+        make_windows(fit_rows, features, window_days, horizons),
+        make_windows(rows.iloc[validation_start - window_days:cutoff], features, window_days, horizons),
+        make_windows(rows.iloc[cutoff - window_days:scored_end], features, window_days, horizons),
+    ]
+    if standardize:
+        splits = _standardize_all(fit_rows, features, scaled, splits)
+
+    return Dataset(
+        track=track,
+        feature_columns=tuple(features),
+        horizons=tuple(horizons),
+        train=splits[0],
+        validation=splits[1],
+        test=splits[2],
         standardized=standardize,
     )

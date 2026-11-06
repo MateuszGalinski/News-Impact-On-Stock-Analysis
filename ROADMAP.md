@@ -1,0 +1,133 @@
+# Roadmap
+
+Agreed plan as of 2026-11-06. Step 1 is built and has had its first run. Steps 2 to 5 haven't started.
+
+**Project aim:** show how unstructured data (news) can be combined with structured data (prices), and how well RAG suits that task.
+
+**Starting point:** Phase 2 in `training/benchmarking/notebooks/model_comparison.ipynb`, which uses common dates and standardization. It fixed training, but no model has a dependable edge over the baseline on validation. Phases 1 and 2 stay in the notebook as the record.
+
+**Rules for every step:**
+
+- Keep the test split locked until the final comparison, and use it once.
+- Fix the options to compare before seeing results, and report all of them.
+- Judge directional accuracy against always-up, and MSE and MAE against the train-mean baseline.
+- Preserve the one-day news shift and the after-close roll, which prevent look-ahead leakage.
+
+## 1. Walk-forward evaluation
+
+Every model is currently judged on the same 123 days in 2025, which is too few to separate real differences from noise. This step comes first because it decides how every later change gets judged. It has no API cost.
+
+- Train on an early period, score the next stretch, then extend the training period and repeat.
+- Refit the scaling each round, on that round's training data only.
+- Use only the first 90% of the data, so the test split stays locked. That's about 1,380 days. Starting with about 600 for training gives about 780 scored days, in roughly 8 rounds.
+- Report confidence intervals that account for returns on nearby days being related.
+- Save results as the run goes. Each model trains once per round for each seed, so runs will be slower. Use fewer seeds if it takes too long.
+
+First run: put the Phase 2 setup through walk-forward, before changing any models, to see how much of the current results survive.
+
+**Result (2026-11-06):** none of the 9 setups beat the baseline. Over 781 scored days (2022-05-25 to 2025-07-08), no seed of any setup beat the train-mean baseline on MSE, and every setup averaged below always-up (54.9%) on direction. The best MSE result, XGBoost v2 on news, has an out-of-sample R² of -0.027 (95% interval -0.047 to -0.010). The small positive results on the old 123 validation days didn't survive. The confidence intervals are about ±4 points on direction.
+
+## 2. Fair models
+
+No API cost.
+
+- Use one standardized LSTM and one XGBoost, with the same setup on every track. From here we compare inputs, not architectures.
+- Retire XGBoost v2's separate settings. Drop the RNN from the comparison unless walk-forward gives a reason to keep it.
+- Run early stopping on its own slice from the end of each training period, not on the data being scored. This removes the optimism in XGBoost v2's current result.
+
+## 3. A stronger news baseline
+
+The news track overfits, with train R² of about 0.30 against about -0.12 on validation for the LSTM. It has 7 news features across a 30-day window, so 210 news values per sample, and neighboring days share 4 of their 5 days of news. The winner becomes the control for RAG.
+
+Compare these options, using the existing cache only, with no LLM reruns:
+
+| Option | News inputs per sample | What it tests |
+|---|---|---|
+| All 7 features across the window (current) | 210 | The control |
+| Fewer features (example: sentiment, materiality, article count) | 90 | Whether some features are mostly noise |
+| All 7 features, last day only | 7 | Whether the news history adds anything |
+| All 7 features, with dropout and early stopping | 210 | Whether the problem is training rather than the inputs |
+
+Fix the exact feature subset before seeing results. Keep the rolling window, one-day shift and after-close rule as they are.
+
+## 4. Pretraining on other companies
+
+Fit an LSTM on other companies, then fine-tune it to predict NVDA. Start with no news and with features, which is free. Drop the no-features track for this test. Test news only if pretraining helps.
+
+Compare on the same NVDA walk-forward days:
+
+| Version | Trains on | What it tells you |
+|---|---|---|
+| A. NVDA only, common dates | NVDA from 2020 | The main control |
+| B. NVDA only, full history | NVDA from 1999 | Whether more NVDA data is enough on its own |
+| C. Pretrained, no fine-tuning | Other companies only | Whether any general pattern carries over |
+| D. Pretrained and fine-tuned | Other companies, then NVDA | The idea being tested |
+
+**Decision rule:** pretraining earns its place only if D beats both A and B, with confidence intervals that support it.
+
+Rules to keep it fair:
+
+- **Time cutoff:** in each round, other companies' data must end before NVDA's scored period starts.
+- **Separate scaling:** standardize each company with its own pre-cutoff statistics.
+- **Companies fixed in advance:** semiconductors (AMD, AVGO, INTC, MU, QCOM, TSM), and maybe big tech as a second group. These all survived and mostly did well, so mention that bias in the write-up.
+- **One fine-tuning method:** a lower learning rate and early stopping on a separate slice, chosen before seeing results.
+
+If D wins, add news in this order:
+
+1. Pretrain the price LSTM on other companies, with prices only. Combine its output with NVDA's existing news features in a small network trained on NVDA. Compare D against D plus news. This needs no new API calls and is close to the "autoencoder plus LLM output" idea in `notes.txt`.
+2. Only if that shows promise, pretrain on other companies' news.
+
+Other companies' news needs code changes and API spend. LLM scores exist only for NVDA, the prompt is hardcoded to NVDA, and the cache is keyed by date alone, so it would wrongly reuse NVDA's scores. Raw news exists for Apple, Google, Microsoft, Tesla and CD Projekt. Scores may also carry over poorly between companies.
+
+## 5. Non-RAG control and RAG tracks
+
+### 5a. Audit the news data (no API cost)
+
+- **Coverage:** the cache has 653 scored days against 1,536 trading days, so at most about 43% are covered. Daily article counts cap at 25 with a median of 23, which suggests capped results bunched on certain days.
+- **Other sources:** check whether the Alpaca and other local news data fill the gaps. Don't fetch new data unless explicitly asked.
+- **Hindsight risk:** the LLM may already know how 2020-2025 events turned out. Compare scores with and without company names, and look at any period after the model's knowledge cutoff.
+
+### 5b. Non-RAG control
+
+Build the "per time frame" version from `README.md`, where the LLM sees all articles from a 5-day window. This shows whether RAG adds anything beyond giving the model more context.
+
+### 5c. `news_features_from_rag`
+
+- **Retrieval:** combine embeddings and keyword search. Only documents published before the prediction date can be retrieved, enforced by an automated test.
+- **Features:** use the same schema as the current news features, so the tracks compare directly.
+- **Comparisons:** fixed queries vs LLM-written queries, and today's news vs older context, which is RAG's real advantage over daily scoring.
+- **Saved evidence:** store the retrieved articles for each day, and include the model and prompt in the cache key.
+- **Pilot first:** try a sample of training days to measure quality and cost before running everything.
+
+### 5d. `news_shaped_based_rag`
+
+Retrieve similar past 30-day return patterns, in two stages:
+
+1. **Shape only:** use what followed those past patterns. This is free and acts as a control.
+2. **Shape plus news:** add the news from around those past dates.
+
+If stage 2 beats stage 1, that's direct evidence for combining the two data types.
+
+### 5e. Final comparison
+
+Run this once, then unlock the test split for the final results.
+
+| Question | How to measure it |
+|---|---|
+| Does retrieval find the right articles? | Precision against about 50 hand-labelled days, and whether earnings days are found |
+| Do the features reflect real events? | Match with known events, and link to the size of the next move |
+| Do the features improve prediction? | MSE and MAE against the baseline, direction against always-up, with confidence intervals |
+| Is it practical? | Cost per day, and whether a prediction can be traced to its articles |
+
+The project still has something to show if return prediction doesn't improve but RAG finds better evidence and detects events better. "RAG adds traceability but no predictive edge" is a legitimate finding.
+
+## Open questions
+
+1. Which research paper does the shape-based approach copy? Needed for 5d.
+2. What's the API budget? This sets how much of step 4's news work and step 5 can run. The pilot will give a real cost per day.
+3. Should move size be added as a second target? News may suit it better than direction. Direction and return prediction would stay as they are.
+
+## Later, if useful
+
+- Transformers, from `notes.txt`. They answer a different question from the one this plan tests.
+- More target companies, which could add a lot of statistical power.

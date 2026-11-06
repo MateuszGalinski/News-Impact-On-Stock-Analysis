@@ -25,8 +25,10 @@ def summarize_seeds(metrics: pd.DataFrame) -> pd.DataFrame:
     return summary.reset_index()
 
 
-def score_predictions(actual, predicted, baseline: float) -> dict[str, float]:
-    """Score predictions against a constant baseline such as the train mean.
+def score_predictions(actual, predicted, baseline) -> dict[str, float]:
+    """Score predictions against a baseline such as the train mean.
+
+    baseline is one number, or one number per row when it changes over time.
 
     directional_accuracy compares signs, so a flat day only counts as correct
     when the prediction is exactly zero. Compare it with always_up_accuracy,
