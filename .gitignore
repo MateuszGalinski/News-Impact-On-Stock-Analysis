@@ -8,3 +8,4 @@
 .vscode
 .env
 data
+__pycache__/
