@@ -1,7 +1,7 @@
 """Build each track's features, chronological splits and model windows."""
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -46,12 +46,19 @@ class WindowedSplit:
 
 @dataclass(frozen=True)
 class Dataset:
+    """A track's windows. `y` is always in log-return units.
+
+    standardized: inputs are already standardized, and `fit_model` trains on a
+        standardized target and converts predictions back to log returns.
+    """
+
     track: str
     feature_columns: tuple[str, ...]
     horizons: tuple[int, ...]
     train: WindowedSplit
     validation: WindowedSplit
     test: WindowedSplit
+    standardized: bool = False
 
 
 def load_stock(path: Path = STOCK_PATH) -> pd.DataFrame:
@@ -185,6 +192,22 @@ def build_track_frame(track: str) -> tuple[pd.DataFrame, list[str], list[str]]:
     return stock, features, scaled
 
 
+def _restrict_to_news_dates(frame: pd.DataFrame) -> pd.DataFrame:
+    """Keep only the news track's dates, so every track gets the same rows."""
+    news_dates = build_track_frame(NEWS_WITH_FEATURES)[0]["DATE"]
+    missing = set(news_dates) - set(frame["DATE"])
+    if missing:
+        raise ValueError(f"{len(missing)} news track dates are missing, first is {min(missing)}")
+    return frame[frame["DATE"].isin(news_dates)].reset_index(drop=True)
+
+
+def _standardize_inputs(split: WindowedSplit, scaler: StandardScaler, indices: list[int]) -> WindowedSplit:
+    X = split.X.copy()
+    rows = X[:, :, indices].reshape(-1, len(indices))
+    X[:, :, indices] = scaler.transform(rows).reshape(X.shape[0], X.shape[1], len(indices))
+    return replace(split, X=X)
+
+
 def make_windows(
     frame: pd.DataFrame,
     feature_columns: list[str],
@@ -225,8 +248,17 @@ def prepare_dataset(
     window_days: int = 30,
     train_fraction: float = 0.8,
     validation_fraction: float = 0.1,
+    common_dates: bool = False,
+    standardize: bool = False,
 ) -> Dataset:
-    """Build a track's windows from a chronological train/validation/test split."""
+    """Build a track's windows from a chronological train/validation/test split.
+
+    common_dates: limit the track to the news track's dates, so all tracks share
+        the same splits and targets. Indicators are calculated first, on the
+        full price history.
+    standardize: standardize the inputs using training rows only. Cyclical date
+        features stay as they are because they're already between -1 and 1.
+    """
     if not horizons or any(horizon <= 0 for horizon in horizons):
         raise ValueError("horizons must contain positive integers")
     if len(set(horizons)) != len(horizons):
@@ -235,6 +267,8 @@ def prepare_dataset(
         raise ValueError("train and validation fractions must be positive and leave rows for test")
 
     frame, features, scaled = build_track_frame(track)
+    if common_dates and track != NEWS_WITH_FEATURES:
+        frame = _restrict_to_news_dates(frame)
 
     train_size = int(len(frame) * train_fraction)
     validation_size = int(len(frame) * validation_fraction)
@@ -247,11 +281,25 @@ def prepare_dataset(
         for split in (train, validation, test):
             split[scaled] = scaler.transform(split[scaled])
 
+    # Standardized after windowing because the return column also builds the targets.
+    train_windows = make_windows(train, features, window_days, horizons)
+    validation_windows = make_windows(validation, features, window_days, horizons)
+    test_windows = make_windows(test, features, window_days, horizons)
+
+    if standardize:
+        columns = [c for c in features if c not in CYCLICAL_COLUMNS and c not in scaled]
+        indices = [features.index(column) for column in columns]
+        scaler = StandardScaler().fit(train[columns].to_numpy())
+        train_windows = _standardize_inputs(train_windows, scaler, indices)
+        validation_windows = _standardize_inputs(validation_windows, scaler, indices)
+        test_windows = _standardize_inputs(test_windows, scaler, indices)
+
     return Dataset(
         track=track,
         feature_columns=tuple(features),
         horizons=tuple(horizons),
-        train=make_windows(train, features, window_days, horizons),
-        validation=make_windows(validation, features, window_days, horizons),
-        test=make_windows(test, features, window_days, horizons),
+        train=train_windows,
+        validation=validation_windows,
+        test=test_windows,
+        standardized=standardize,
     )

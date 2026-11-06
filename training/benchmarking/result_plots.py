@@ -112,7 +112,11 @@ def _legend_handles(splits: list[str]) -> list:
     return handles
 
 
-def plot_overfit_results(overfit: pd.DataFrame, r2_limits: tuple[float, float] = (-1, 1.05)) -> None:
+def plot_overfit_results(
+    overfit: pd.DataFrame,
+    r2_limits: tuple[float, float] = (-1, 1.05),
+    title: str = "Can each model memorize 100 training windows?",
+) -> None:
     """Plot `overfit_check` results: can each model memorize a small training set?"""
     tracks = _tracks_in(overfit)
     with plt.rc_context(CHART_STYLE):
@@ -132,7 +136,7 @@ def plot_overfit_results(overfit: pd.DataFrame, r2_limits: tuple[float, float] =
             ax.set_xlabel("R² on the windows it trained on (1 = memorized)")
 
         fig.suptitle(
-            "Can each model memorize 100 training windows?",
+            title,
             x=0.01, ha="left", fontsize=13, color=PRIMARY_INK,
         )
         fig.legend(
@@ -149,6 +153,7 @@ def plot_seed_results(
     metrics: pd.DataFrame,
     horizon: int = 1,
     r2_limits: tuple[float, float] = (-0.4, 0.35),
+    title: str | None = None,
 ) -> None:
     """Plot `run_experiment` metrics for one horizon, with one dot per seed.
 
@@ -190,7 +195,7 @@ def plot_seed_results(
             column[1].set_xlabel("Direction edge over always-up (percentage points)")
 
         fig.suptitle(
-            f"Full training across seeds, {horizon}-day horizon",
+            title or f"Full training across seeds, {horizon}-day horizon",
             x=0.01, ha="left", fontsize=13, color=PRIMARY_INK,
         )
         fig.legend(handles=_legend_handles(splits), loc="upper right", ncols=3, frameon=False, fontsize=10)

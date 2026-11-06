@@ -9,7 +9,10 @@ from .models import NOTEBOOK_MODELS, ModelSpec, fit_model
 
 @dataclass(frozen=True)
 class ExperimentConfig:
-    """One experiment. `models` defaults to the track's notebook models."""
+    """One experiment. `models` defaults to the track's notebook models.
+
+    common_dates and standardize are described in `prepare_dataset`.
+    """
 
     track: str
     models: tuple[ModelSpec, ...] | None = None
@@ -18,6 +21,8 @@ class ExperimentConfig:
     seeds: tuple[int, ...] = (42,)
     train_fraction: float = 0.8
     validation_fraction: float = 0.1
+    common_dates: bool = False
+    standardize: bool = False
 
 
 def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> dict:
@@ -41,6 +46,8 @@ def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> 
         window_days=config.window_days,
         train_fraction=config.train_fraction,
         validation_fraction=config.validation_fraction,
+        common_dates=config.common_dates,
+        standardize=config.standardize,
     )
     specs = config.models if config.models is not None else NOTEBOOK_MODELS[config.track]
 

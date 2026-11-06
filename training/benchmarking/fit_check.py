@@ -39,8 +39,12 @@ CHART_STYLE = {
 }
 
 
-def training_fit_summary(actual, predictions: Mapping) -> pd.DataFrame:
-    """Return one row of training-fit metrics per model."""
+def training_fit_summary(actual, predictions: Mapping, baseline: float | None = None) -> pd.DataFrame:
+    """Return one row of fit metrics per model.
+
+    The baseline defaults to the mean of `actual`, which is the train mean when
+    scoring training data. Pass the train mean when scoring any other split.
+    """
     actual = np.ravel(actual)
     if len(actual) == 0:
         raise ValueError("actual contains no rows")
@@ -48,7 +52,7 @@ def training_fit_summary(actual, predictions: Mapping) -> pd.DataFrame:
     rows = {}
     for name, predicted in predictions.items():
         try:
-            rows[name] = score_predictions(actual, predicted, actual.mean())
+            rows[name] = score_predictions(actual, predicted, actual.mean() if baseline is None else baseline)
         except ValueError as error:
             raise ValueError(f"{name}: {error}") from error
     return pd.DataFrame.from_dict(rows, orient="index")
@@ -60,23 +64,29 @@ def plot_training_fit(
     dates=None,
     title: str = "Fit on training data",
     zoom_days: int = 100,
+    split_name: str = "training",
+    baseline: float | None = None,
 ) -> pd.DataFrame:
-    """Plot actual vs fitted training values and return the summary table.
+    """Plot actual vs predicted values and return the summary table.
 
-    Each model gets a row with the whole training period on the left and the
-    last `zoom_days` on the right, where individual days are readable.
+    Each model gets a row with the whole period on the left and the last
+    `zoom_days` on the right, where individual days are readable.
 
     Args:
-        actual: training targets, in time order.
-        predictions: model name -> predictions on the training inputs.
+        actual: targets, in time order.
+        predictions: model name -> predictions on the matching inputs.
         dates: optional date for each target. Rows are numbered without it.
+        split_name: the split being plotted, used in the labels.
+        baseline: optional train mean, drawn as a flat line and used for the
+            baseline metrics.
     """
-    summary = training_fit_summary(actual, predictions)
+    summary = training_fit_summary(actual, predictions, baseline)
     actual = np.ravel(actual)
+    predicted_label = "Fitted" if split_name == "training" else "Predicted"
 
     if dates is None:
         x = np.arange(len(actual))
-        x_label = "Training row"
+        x_label = f"{split_name.capitalize()} row"
     else:
         x = pd.to_datetime(pd.Series(dates)).to_numpy()
         x_label = None
@@ -97,9 +107,14 @@ def plot_training_fit(
             predicted = np.ravel(predicted)
             full_ax, zoom_ax = row
             full_ax.plot(x, actual, color=ACTUAL_COLOR, linewidth=0.7, label="Actual")
-            full_ax.plot(x, predicted, color=FITTED_COLOR, linewidth=1.2, label="Fitted")
+            full_ax.plot(x, predicted, color=FITTED_COLOR, linewidth=1.2, label=predicted_label)
             zoom_ax.plot(x[zoom_start:], actual[zoom_start:], color=ACTUAL_COLOR, linewidth=1.5)
             zoom_ax.plot(x[zoom_start:], predicted[zoom_start:], color=FITTED_COLOR, linewidth=2)
+            if baseline is not None:
+                full_ax.axhline(
+                    baseline, color=PRIMARY_INK, linewidth=1.2, linestyle="--", label="Train-mean baseline"
+                )
+                zoom_ax.axhline(baseline, color=PRIMARY_INK, linewidth=1.2, linestyle="--")
 
             stats = summary.loc[name]
             full_ax.set_title(
@@ -108,7 +123,7 @@ def plot_training_fit(
                 fontsize=11,
             )
             zoom_ax.set_title(
-                f"{name}: last {len(actual) - zoom_start} training days",
+                f"{name}: last {len(actual) - zoom_start} {split_name} days",
                 loc="left",
                 fontsize=11,
             )
@@ -131,21 +146,56 @@ def plot_training_fit(
 
         handles, labels = axes[0][0].get_legend_handles_labels()
         fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
-        fig.legend(handles, labels, loc="upper right", ncols=2, frameon=False, fontsize=10)
+        fig.legend(handles, labels, loc="upper right", ncols=len(labels), frameon=False, fontsize=10)
         plt.show()
 
     return summary
 
 
-def plot_experiment_training_fit(result: dict, seed: int | None = None, zoom_days: int = 100) -> pd.DataFrame:
-    """Run the training-fit check on a `run_experiment` result, one figure per horizon.
+def plot_validation_fit(predictions: pd.DataFrame, seed: int | None = None, zoom_days: int = 60, title: str | None = None) -> pd.DataFrame:
+    """Plot actual vs predicted validation returns, one figure per horizon.
 
-    Uses the first seed in the experiment unless `seed` is given.
+    Takes the `predictions` table from `run_experiment`, which can be read back
+    from a saved file. Uses the first seed unless `seed` is given.
     """
-    config = result["config"]
-    seed = config.seeds[0] if seed is None else seed
-    predictions = result["predictions"]
-    rows = predictions[(predictions["split"] == "train") & (predictions["seed"] == seed)]
+    rows = predictions[predictions["split"] == "validation"]
+    seed = rows["seed"].iloc[0] if seed is None and not rows.empty else seed
+    rows = rows[rows["seed"] == seed]
+    if rows.empty:
+        raise ValueError(f"No validation predictions for seed {seed}")
+
+    summaries = []
+    for horizon, by_horizon in rows.groupby("horizon"):
+        by_model = dict(tuple(by_horizon.groupby("model", sort=False)))
+        first = next(iter(by_model.values()))
+        heading = title or "Fit on validation data"
+        summary = plot_training_fit(
+            first["actual"],
+            {name: frame["predicted"] for name, frame in by_model.items()},
+            dates=first["date"],
+            title=f"{heading}: {horizon}-day cumulative log return, seed {seed}",
+            zoom_days=zoom_days,
+            split_name="validation",
+            baseline=first["baseline"].iloc[0],
+        )
+        summaries.append(summary.assign(horizon=horizon))
+    return pd.concat(summaries)
+
+
+def plot_saved_training_fit(
+    predictions: pd.DataFrame,
+    seed: int | None = None,
+    zoom_days: int = 100,
+    title: str | None = None,
+) -> pd.DataFrame:
+    """Plot actual vs fitted training returns from a `predictions` table, one figure per horizon.
+
+    The table comes from `run_experiment` and can be read back from a saved
+    file. Uses the first seed unless `seed` is given.
+    """
+    rows = predictions[predictions["split"] == "train"]
+    seed = rows["seed"].iloc[0] if seed is None and not rows.empty else seed
+    rows = rows[rows["seed"] == seed]
     if rows.empty:
         raise ValueError(f"No training predictions for seed {seed}")
 
@@ -153,12 +203,22 @@ def plot_experiment_training_fit(result: dict, seed: int | None = None, zoom_day
     for horizon, by_horizon in rows.groupby("horizon"):
         by_model = dict(tuple(by_horizon.groupby("model", sort=False)))
         first = next(iter(by_model.values()))
+        heading = title or "Fit on training data"
         summary = plot_training_fit(
             first["actual"],
             {name: frame["predicted"] for name, frame in by_model.items()},
             dates=first["date"],
-            title=f"Fit on training data: {horizon}-day cumulative log return",
+            title=f"{heading}: {horizon}-day cumulative log return",
             zoom_days=zoom_days,
         )
         summaries.append(summary.assign(horizon=horizon))
     return pd.concat(summaries)
+
+
+def plot_experiment_training_fit(result: dict, seed: int | None = None, zoom_days: int = 100) -> pd.DataFrame:
+    """Run the training-fit check on a `run_experiment` result, one figure per horizon.
+
+    Uses the first seed in the experiment unless `seed` is given.
+    """
+    seed = result["config"].seeds[0] if seed is None else seed
+    return plot_saved_training_fit(result["predictions"], seed=seed, zoom_days=zoom_days)

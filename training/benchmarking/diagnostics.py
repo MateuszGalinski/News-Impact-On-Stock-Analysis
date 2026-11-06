@@ -45,6 +45,8 @@ def overfit_check(
     window_count: int = 100,
     epochs: tuple[int, ...] = (20, 1000),
     seeds: tuple[int, ...] = (42, 43, 44),
+    common_dates: bool = False,
+    standardize: bool = False,
 ) -> pd.DataFrame:
     """Test whether each model can memorize a small training set.
 
@@ -53,8 +55,13 @@ def overfit_check(
     can't memorize 100 windows, more data or features won't fix it.
 
     XGBoost runs once per seed as a control, with its own memorizing settings.
+    common_dates and standardize are described in `prepare_dataset`. Inputs are
+    standardized using the full training split, and the target using these windows.
     """
-    dataset = small_training_set(prepare_dataset(track, horizons=(1,)), window_count)
+    dataset = small_training_set(
+        prepare_dataset(track, horizons=(1,), common_dates=common_dates, standardize=standardize),
+        window_count,
+    )
     specs = [
         (ModelSpec(name, kind, {**RECURRENT_PARAMS, "epochs": count}), count)
         for name, kind in (("RNN", "rnn"), ("LSTM", "lstm"))

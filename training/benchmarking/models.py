@@ -1,7 +1,7 @@
 """Model definitions, using the same settings as each track's notebook."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 
@@ -79,13 +79,17 @@ class FittedModel:
         self.spec = spec
         self.estimators = estimators
         self.feature_columns = feature_columns
+        self.target_mean = 0.0
+        self.target_std = 1.0
 
     def predict(self, X: np.ndarray) -> np.ndarray:
+        """Predict log returns, with one column per horizon."""
         if self.spec.kind == "xgboost":
             inputs = _tabular_inputs(self.spec, X, self.feature_columns)
-            return np.column_stack([estimator.predict(inputs) for estimator in self.estimators])
-        predictions = self.estimators[0].predict(X, verbose=0)
-        return np.asarray(predictions).reshape(len(X), -1)
+            predictions = np.column_stack([estimator.predict(inputs) for estimator in self.estimators])
+        else:
+            predictions = np.asarray(self.estimators[0].predict(X, verbose=0)).reshape(len(X), -1)
+        return predictions * self.target_std + self.target_mean
 
 
 def _fit_recurrent(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
@@ -136,8 +140,24 @@ def _fit_xgboost(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
 
 
 def fit_model(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
+    """Train one model. A standardized dataset also gets a standardized target."""
+    target_mean, target_std = 0.0, 1.0
+    if dataset.standardized:
+        target_mean = dataset.train.y.mean(axis=0)
+        target_std = dataset.train.y.std(axis=0)
+        dataset = replace(
+            dataset,
+            train=replace(dataset.train, y=(dataset.train.y - target_mean) / target_std),
+            validation=replace(dataset.validation, y=(dataset.validation.y - target_mean) / target_std),
+        )
+
     if spec.kind in ("rnn", "lstm"):
-        return _fit_recurrent(spec, dataset, seed)
-    if spec.kind == "xgboost":
-        return _fit_xgboost(spec, dataset, seed)
-    raise ValueError(f"Unknown model kind {spec.kind!r}")
+        fitted = _fit_recurrent(spec, dataset, seed)
+    elif spec.kind == "xgboost":
+        fitted = _fit_xgboost(spec, dataset, seed)
+    else:
+        raise ValueError(f"Unknown model kind {spec.kind!r}")
+
+    fitted.target_mean = target_mean
+    fitted.target_std = target_std
+    return fitted
