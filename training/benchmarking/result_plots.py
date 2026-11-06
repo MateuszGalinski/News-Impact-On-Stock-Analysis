@@ -311,6 +311,122 @@ def plot_walk_forward_rounds(round_metrics: pd.DataFrame, title: str = "Walk-for
         plt.show()
 
 
+def plot_move_intervals(
+    intervals: pd.DataFrame,
+    title: str = "Move size: all scored days",
+    r2_limits: tuple[float, float] | None = None,
+) -> None:
+    """Plot `move_intervals`, with a 95% interval around each estimate.
+
+    The top row shows out-of-sample R² against the train mean, and the bottom
+    row shows rank correlation with actual moves. The dashed lines mark HAR, the
+    main baseline, so a model has to be right of them to beat it. With
+    `r2_limits`, an R² below the limit gets a label with its value in place of a dot.
+    """
+    har = intervals[intervals["model"] == "HAR"].iloc[0]
+    with plt.rc_context(CHART_STYLE):
+        fig, axes, tracks = _forward_panels(intervals)
+        for column, track in zip(axes.T, tracks):
+            rows = intervals[intervals["track"] == track]
+            models = list(rows["model"])
+            for ax, metric, color in ((column[0], "oos_r2", ACTUAL_COLOR), (column[1], "rank_correlation", FITTED_COLOR)):
+                for y, row in enumerate(rows.to_dict("records")):
+                    ax.plot([row[f"{metric}_lower"], row[f"{metric}_upper"]], [y, y], color=color, linewidth=2, zorder=2)
+                    ax.scatter(row[metric], y, s=56, color=color, edgecolors=SURFACE_COLOR, linewidths=1, zorder=3)
+                _style_panel(ax, models)
+                ax.axvline(har[metric], color=PRIMARY_INK, linewidth=1, linestyle="--", zorder=1)
+            if r2_limits is not None:
+                column[0].set_xlim(*r2_limits)
+                for y, row in enumerate(rows.to_dict("records")):
+                    if row["oos_r2"] < r2_limits[0]:
+                        column[0].annotate(
+                            f"\u2190 {row['oos_r2']:.2f}", (r2_limits[0], y), xytext=(4, 0), textcoords="offset points",
+                            va="center", fontsize=9, color=SECONDARY_INK,
+                        )
+            column[0].set_title(TRACK_TITLES.get(track, track), loc="left", fontsize=11)
+            column[0].set_xlabel("Out-of-sample R² (0 = train mean)")
+            column[1].set_xlabel("Rank correlation with actual moves")
+
+        fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        fig.legend(
+            handles=[
+                plt.Line2D([], [], color=SECONDARY_INK, marker="o", markersize=7, linewidth=2, label="Estimate with 95% interval"),
+                plt.Line2D([], [], color=PRIMARY_INK, linewidth=1, linestyle="--", label="HAR"),
+            ],
+            loc="upper right", ncols=2, frameon=False, fontsize=10,
+        )
+        plt.show()
+
+
+def plot_move_comparisons(comparisons: pd.DataFrame, column: str, title: str) -> None:
+    """Plot `compare_moves` rows, with one panel per value of `column` and a 95% interval.
+
+    Right of zero favors the first set of predictions named in the comparison.
+    An interval crossing zero means the two can't be told apart.
+    """
+    panels = list(comparisons[column].unique())
+    with plt.rc_context(CHART_STYLE):
+        fig, axes = plt.subplots(
+            3, len(panels), figsize=(max(13, 4 * len(panels)), 8.4), sharex="row", squeeze=False, layout="constrained"
+        )
+        for panel_axes, panel in zip(axes.T, panels):
+            rows = comparisons[comparisons[column] == panel]
+            models = list(rows["model"])
+            for ax, metric, scale, color, label in (
+                (panel_axes[0], "mse_improvement", 1e4, ACTUAL_COLOR, "MSE improvement × 10,000"),
+                (panel_axes[1], "mae_improvement", 1e4, ACTUAL_COLOR, "MAE improvement × 10,000"),
+                (panel_axes[2], "rank_gain", 1, FITTED_COLOR, "Rank correlation gain"),
+            ):
+                for y, row in enumerate(rows.to_dict("records")):
+                    ax.plot(
+                        [scale * row[f"{metric}_lower"], scale * row[f"{metric}_upper"]],
+                        [y, y], color=color, linewidth=2, zorder=2,
+                    )
+                    ax.scatter(scale * row[metric], y, s=56, color=color, edgecolors=SURFACE_COLOR, linewidths=1, zorder=3)
+                _style_panel(ax, models)
+                ax.set_xlabel(label)
+            panel_axes[0].set_title(TRACK_TITLES.get(panel, panel), loc="left", fontsize=11)
+
+        fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        fig.legend(
+            handles=[
+                plt.Line2D([], [], color=SECONDARY_INK, marker="o", markersize=7, linewidth=2, label="Estimate with 95% interval"),
+            ],
+            loc="upper right", frameon=False, fontsize=10,
+        )
+        plt.show()
+
+
+def plot_move_predictions(predictions: pd.DataFrame, models: dict, zoom_days: int = 120, title: str = "Predicted and actual move size") -> None:
+    """Plot actual moves against each model's predictions, averaged across seeds.
+
+    `models` maps a chart label to (track, model). The top panel shows all scored
+    days, and the bottom panel shows the last `zoom_days`.
+    """
+    colors = [FITTED_COLOR, PRIMARY_INK]
+    with plt.rc_context(CHART_STYLE):
+        fig, axes = plt.subplots(2, 1, figsize=(13, 7.2), layout="constrained")
+        for ax, days in zip(axes, (None, zoom_days)):
+            for index, (label, (track, model)) in enumerate(models.items()):
+                rows = predictions[(predictions["track"] == track) & (predictions["model"] == model)]
+                daily = rows.assign(day=pd.to_datetime(rows["date"])).groupby("day")[["actual", "predicted"]].mean()
+                daily = daily if days is None else daily.iloc[-days:]
+                if index == 0:
+                    ax.plot(daily.index, daily["actual"], color=ACTUAL_COLOR, linewidth=0.9, alpha=0.75, label="Actual", zorder=1)
+                ax.plot(daily.index, daily["predicted"], color=colors[index], linewidth=1.8, label=label, zorder=2 + index)
+            ax.set_ylabel("Move size (absolute log return)")
+            ax.grid(axis="y", color=GRID_COLOR, linewidth=0.6)
+            ax.set_axisbelow(True)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.tick_params(length=0, labelsize=9)
+        axes[0].set_title("All scored days", loc="left", fontsize=11)
+        axes[1].set_title(f"Last {zoom_days} scored days", loc="left", fontsize=11)
+        fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        handles, labels = axes[0].get_legend_handles_labels()
+        fig.legend(handles, labels, loc="upper right", ncols=len(labels), frameon=False, fontsize=10)
+        plt.show()
+
+
 def plot_candidate_curves(
     curves: pd.DataFrame,
     control: str,

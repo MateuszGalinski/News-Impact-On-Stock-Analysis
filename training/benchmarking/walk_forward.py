@@ -16,6 +16,7 @@ from .data import (
     NEWS_WITH_FEATURES_AND_TECH,
     NO_NEWS_NO_FEATURES,
     NO_NEWS_WITH_FEATURES,
+    RETURN_TARGET,
     load_track_rows,
     prepare_walk_forward_round,
     split_sizes,
@@ -58,6 +59,7 @@ class WalkForwardConfig:
     early_stopping_fraction: float = 0.1
     common_dates: bool = True
     standardize: bool = True
+    target: str = RETURN_TARGET
 
 
 def round_boundaries(row_count: int, start_days: int, step_days: int) -> list[tuple[int, int]]:
@@ -72,7 +74,7 @@ def round_boundaries(row_count: int, start_days: int, step_days: int) -> list[tu
 
 def load_development_rows(config: WalkForwardConfig) -> tuple[pd.DataFrame, list[str], list[str]]:
     """Load a track's rows, leaving out the locked test split."""
-    frame, features, scaled = load_track_rows(config.track, common_dates=config.common_dates)
+    frame, features, scaled = load_track_rows(config.track, common_dates=config.common_dates, target=config.target)
     train_size, validation_size = split_sizes(len(frame), config.train_fraction, config.validation_fraction)
     return frame.iloc[:train_size + validation_size].reset_index(drop=True), features, scaled
 
@@ -144,6 +146,7 @@ def run_walk_forward(config: WalkForwardConfig, results_path: Path | None = None
             window_days=config.window_days,
             early_stopping_fraction=config.early_stopping_fraction,
             standardize=config.standardize,
+            target=config.target,
         )
         for spec, seed in pending:
             predictions = _round_predictions(config, spec, seed, round_number, dataset)

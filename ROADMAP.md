@@ -1,6 +1,6 @@
 # Roadmap
 
-Agreed plan as of 2026-11-06. Steps 1, 2 and 3a are built and have been run. Steps 3b, 4 and 5 haven't started.
+Agreed plan as of 2026-11-06. Steps 1, 2 and 3a are built and have been run. Step 3c is in progress. Steps 3b, 4 and 5 haven't started.
 
 **Project aim:** show how unstructured data (news) can be combined with structured data (prices), and how well RAG suits that task.
 
@@ -110,6 +110,40 @@ A separate test, run after 3a on the best stable setup, using the cached news fe
 - **Also consider:** the LLM's event type and time horizon fields, which the models don't use yet. Check that they're in the cache first.
 - **Last-day news:** test it here too, as an alternative to the full window.
 - **A negative result** applies only to these features, target and models. It doesn't rule out better news features, such as ones from RAG.
+
+### 3c. Move-size and horizon tests
+
+Next-day returns haven't beaten the baseline in any test so far. Move size, the next day's absolute log return, gives a target with a known pattern, because big moves tend to follow big moves. It answers whether news adds anything to that pattern. The return target stays as it is, and this has no API cost.
+
+The plan below was fixed before any results.
+
+**Stage 1, 1-day move size:** `training/benchmarking/notebooks/move_size.ipynb`, using 3 seeds on walk-forward and 80/10/10.
+
+- **Inputs:** the 4 input sets, each with the day's absolute return added.
+- **Baselines:** the train mean, yesterday's move, the 5-day and 20-day average moves, and HAR (Corsi, 2009), a linear regression on the 1, 5 and 22-day average moves. HAR is the main baseline.
+- **Models:** RNN and LSTM, as the control and with dropout 0.5. XGBoost, as the control and Stronger with a patience of 30. HAR plus the last day's news features.
+- **Measures:** MSE and MAE, Pearson and rank correlation, and how often the biggest 20% of moves are caught, with the cutoff set from each round's known days.
+
+The questions, in order:
+
+1. **Is there a pattern?** HAR's R² interval must be above zero against the train mean, or the test stops there.
+2. **Does a trained model add anything?** Its MSE improvement over HAR must have an interval above zero, with MAE and rank correlation not clearly worse.
+3. **Does news help?** With the same model, news must beat no news on the same terms. HAR + news vs HAR is the simplest version of this test.
+
+If news wins, run a shuffled-news placebo and the news audit (5a) before trusting it. Article count could just reflect that big days attract more news, and the LLM may know how past events turned out.
+
+**Stage 1 result (2026-11-06):** under the rules above, the test stops at question 1, and news shows no benefit.
+
+- **Question 1:** HAR's R² is 0.012 (95% interval -0.020 to 0.051), so it doesn't pass. Its rank correlation is 0.133 (0.048 to 0.189), so there's a real but small pattern in which days are bigger. Unlike the return target, 13 of the 26 fitted setups, including HAR, have an R² above zero, but none has an interval above zero.
+- **Question 2:** none of the 25 comparisons with HAR has an MSE interval above zero, and 6 are clearly worse. The 20-day average ranks days about as well as HAR, at 0.144.
+- **Question 3:** in 13 comparisons, news is never better on MSE or rank correlation, and is worse on MSE in 5, including HAR + news vs HAR. It's better on MAE in 2 and worse in 2.
+- **Big moves:** they aren't predicted. HAR predicted 0.022 for the largest move, 0.218, and no trained model catches more than about 6% of big moves.
+- **Spikes:** checked after seeing results. The biggest 1% of days make up 33% of the train mean's squared error, but removing them only raises HAR's R² to 0.024, so they aren't hiding a stronger pattern.
+- **80/10/10:** R² reaches 0.072 and rank correlation 0.36 over 123 days, but news is again never better.
+
+These news features end two days before the scored move's close, and don't include scheduled events such as earnings dates, so this doesn't rule out better news inputs.
+
+**Stage 2, 5-day horizons:** review stage 1 first. Then run 5-day move size, as the average daily move over the 5 days, and 5-day return, each on 749 scored days. Those days overlap, so they're worth only about 150 independent periods. A 20-day horizon was left out, because about 31 independent periods is too few.
 
 ## 4. Pretraining on other companies
 

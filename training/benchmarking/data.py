@@ -21,6 +21,9 @@ TRACKS = (NO_NEWS_NO_FEATURES, NO_NEWS_WITH_FEATURES, NEWS_WITH_FEATURES)
 UNIFIED_TRACKS = (*TRACKS, NEWS_WITH_FEATURES_AND_TECH)
 
 TARGET_COLUMN = "LOG_CLOSE_RETURN"
+RETURN_TARGET = "return"
+MOVE_SIZE_TARGET = "move_size"
+MOVE_INPUT_COLUMN = "ABS_LOG_RETURN"
 CYCLICAL_COLUMNS = ["sin_doy", "cos_doy", "sin_month", "cos_month", "sin_dow", "cos_dow"]
 TECHNICAL_COLUMNS = ["CLOSE_TO_TEMA_10", "EMA_5_20_SPREAD"]
 
@@ -48,10 +51,10 @@ class WindowedSplit:
 
 @dataclass(frozen=True)
 class Dataset:
-    """A track's windows. `y` is always in log-return units.
+    """A track's windows. `y` is always in log-return units, signed or absolute.
 
     standardized: inputs are already standardized, and `fit_model` trains on a
-        standardized target and converts predictions back to log returns.
+        standardized target and converts predictions back to those units.
     early_stopping: data for early stopping when it's separate from `validation`.
     """
 
@@ -221,15 +224,25 @@ def _standardize_inputs(split: WindowedSplit, scaler: StandardScaler, indices: l
     return replace(split, X=X)
 
 
-def load_track_rows(track: str, *, common_dates: bool = False) -> tuple[pd.DataFrame, list[str], list[str]]:
+def load_track_rows(
+    track: str,
+    *,
+    common_dates: bool = False,
+    target: str = RETURN_TARGET,
+) -> tuple[pd.DataFrame, list[str], list[str]]:
     """Return a track's rows, feature columns, and columns to scale.
 
     common_dates limits the track to the news track's dates, after indicators
     have been calculated on the full price history.
+    target: the move-size target adds each day's move as an input, so models
+    don't have to work it out from signed returns.
     """
     frame, features, scaled = build_track_frame(track)
     if common_dates and track not in (NEWS_WITH_FEATURES, NEWS_WITH_FEATURES_AND_TECH):
         frame = _restrict_to_news_dates(frame)
+    if target == MOVE_SIZE_TARGET:
+        frame = frame.assign(**{MOVE_INPUT_COLUMN: frame[TARGET_COLUMN].abs()})
+        features = [TARGET_COLUMN, MOVE_INPUT_COLUMN, *features[1:]]
     return frame, features, scaled
 
 
@@ -261,13 +274,18 @@ def make_windows(
     feature_columns: list[str],
     window_days: int,
     horizons: tuple[int, ...],
+    target: str = RETURN_TARGET,
 ) -> WindowedSplit:
     """Build one split's windows, using only that split's rows.
 
-    Each target is the log return summed over the `horizon` days right after
-    the window. Windows never cross a split, so training targets can't use
-    prices from validation or test, and every horizon shares the same rows.
+    Each target covers the `horizon` days right after the window. By default it's
+    the summed log return. With the move-size target it's the average daily move,
+    because summing first would let an up day and a down day cancel out.
+    Windows never cross a split, so training targets can't use prices from
+    validation or test, and every horizon shares the same rows.
     """
+    if target not in (RETURN_TARGET, MOVE_SIZE_TARGET):
+        raise ValueError(f"Unknown target {target!r}")
     values = frame[feature_columns].to_numpy()
     returns = frame[TARGET_COLUMN].to_numpy()
     dates = frame["DATE"].to_numpy()
@@ -282,7 +300,12 @@ def make_windows(
     X = np.stack([values[start:start + window_days] for start in range(sample_count)])
     y = np.array(
         [
-            [returns[start + window_days:start + window_days + horizon].sum() for horizon in horizons]
+            [
+                returns[start + window_days:start + window_days + horizon].sum()
+                if target == RETURN_TARGET
+                else np.abs(returns[start + window_days:start + window_days + horizon]).mean()
+                for horizon in horizons
+            ]
             for start in range(sample_count)
         ]
     )
@@ -299,6 +322,7 @@ def prepare_dataset(
     common_dates: bool = False,
     standardize: bool = False,
     early_stopping_fraction: float | None = None,
+    target: str = RETURN_TARGET,
 ) -> Dataset:
     """Build a track's windows from a chronological train/validation/test split.
 
@@ -311,6 +335,7 @@ def prepare_dataset(
         early stopping, so models don't stop on the data they're scored on. The
         slice's inputs can use the previous `window_days` rows. Models and
         scaling are fit on the rows before it.
+    target: what the windows predict, as described in `make_windows`.
     """
     if early_stopping_fraction is not None and not 0 < early_stopping_fraction < 1:
         raise ValueError("early_stopping_fraction must be between 0 and 1")
@@ -321,7 +346,7 @@ def prepare_dataset(
     if train_fraction <= 0 or validation_fraction <= 0 or train_fraction + validation_fraction >= 1:
         raise ValueError("train and validation fractions must be positive and leave rows for test")
 
-    frame, features, scaled = load_track_rows(track, common_dates=common_dates)
+    frame, features, scaled = load_track_rows(track, common_dates=common_dates, target=target)
 
     train_size, validation_size = split_sizes(len(frame), train_fraction, validation_fraction)
     train = frame.iloc[:train_size].copy()
@@ -337,12 +362,12 @@ def prepare_dataset(
         for split in (train, validation, test):
             split[scaled] = scaler.transform(split[scaled])
 
-    train_windows = make_windows(train.iloc[:fit_size], features, window_days, horizons)
-    validation_windows = make_windows(validation, features, window_days, horizons)
-    test_windows = make_windows(test, features, window_days, horizons)
+    train_windows = make_windows(train.iloc[:fit_size], features, window_days, horizons, target)
+    validation_windows = make_windows(validation, features, window_days, horizons, target)
+    test_windows = make_windows(test, features, window_days, horizons, target)
     stopping_windows = None
     if early_stopping_fraction is not None:
-        stopping_windows = make_windows(train.iloc[fit_size - window_days:], features, window_days, horizons)
+        stopping_windows = make_windows(train.iloc[fit_size - window_days:], features, window_days, horizons, target)
 
     if standardize:
         fit_rows = train.iloc[:fit_size]
@@ -376,6 +401,7 @@ def prepare_walk_forward_round(
     window_days: int = 30,
     early_stopping_fraction: float = 0.1,
     standardize: bool = True,
+    target: str = RETURN_TARGET,
 ) -> Dataset:
     """Build one walk-forward round. Rows are in time order.
 
@@ -398,9 +424,9 @@ def prepare_walk_forward_round(
     fit_rows = rows.iloc[:validation_start]
 
     splits = [
-        make_windows(fit_rows, features, window_days, horizons),
-        make_windows(rows.iloc[validation_start - window_days:cutoff], features, window_days, horizons),
-        make_windows(rows.iloc[cutoff - window_days:scored_end], features, window_days, horizons),
+        make_windows(fit_rows, features, window_days, horizons, target),
+        make_windows(rows.iloc[validation_start - window_days:cutoff], features, window_days, horizons, target),
+        make_windows(rows.iloc[cutoff - window_days:scored_end], features, window_days, horizons, target),
     ]
     if standardize:
         splits = _standardize_all(fit_rows, features, scaled, splits)

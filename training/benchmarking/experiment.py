@@ -3,7 +3,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from .data import prepare_dataset
+from .data import RETURN_TARGET, prepare_dataset
 from .metrics import score_predictions
 from .models import NOTEBOOK_MODELS, ModelSpec, fit_model
 
@@ -12,8 +12,8 @@ from .models import NOTEBOOK_MODELS, ModelSpec, fit_model
 class ExperimentConfig:
     """One experiment. `models` defaults to the track's notebook models.
 
-    common_dates, standardize and early_stopping_fraction are described in
-    `prepare_dataset`.
+    common_dates, standardize, early_stopping_fraction and target are described
+    in `prepare_dataset`.
     """
 
     track: str
@@ -26,6 +26,7 @@ class ExperimentConfig:
     common_dates: bool = False
     standardize: bool = False
     early_stopping_fraction: float | None = None
+    target: str = RETURN_TARGET
 
 
 def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> dict:
@@ -52,6 +53,7 @@ def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> 
         common_dates=config.common_dates,
         standardize=config.standardize,
         early_stopping_fraction=config.early_stopping_fraction,
+        target=config.target,
     )
     specs = config.models if config.models is not None else NOTEBOOK_MODELS[config.track]
     known_targets = dataset.train.y

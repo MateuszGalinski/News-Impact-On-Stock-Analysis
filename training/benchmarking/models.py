@@ -6,6 +6,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from .data import (
+    MOVE_INPUT_COLUMN,
     NEWS_COLUMNS,
     NEWS_WITH_FEATURES,
     NO_NEWS_NO_FEATURES,
@@ -42,8 +43,9 @@ UNIFIED_XGBOOST_PARAMS = XGBOOST_V2_PARAMS
 class ModelSpec:
     """A model to train.
 
-    kind: "rnn", "lstm" or "xgboost".
+    kind: "rnn", "lstm", "xgboost" or "har".
     params: Keras settings as in RECURRENT_PARAMS, or XGBRegressor arguments.
+        For "har", news=True adds the last day's news features.
         Adding early_stopping_patience to the Keras settings stops training
         after that many epochs without improvement and restores the best weights.
         units can be a tuple for stacked recurrent layers. dropout applies
@@ -86,6 +88,18 @@ def _tabular_inputs(spec: ModelSpec, X: np.ndarray, feature_columns: tuple[str, 
     return np.concatenate([X[:, :, price].reshape(len(X), -1), X[:, -1, news]], axis=1)
 
 
+HAR_DAYS = (1, 5, 22)
+
+
+def _har_inputs(spec: ModelSpec, X: np.ndarray, feature_columns: tuple[str, ...]) -> np.ndarray:
+    """Return the average move over the last 1, 5 and 22 days (Corsi, 2009)."""
+    moves = X[:, :, feature_columns.index(MOVE_INPUT_COLUMN)]
+    inputs = [moves[:, -days:].mean(axis=1) for days in HAR_DAYS]
+    if spec.params.get("news", False):
+        inputs += [X[:, -1, i] for i, column in enumerate(feature_columns) if column in NEWS_COLUMNS]
+    return np.column_stack(inputs)
+
+
 class FittedModel:
     """A trained model that predicts one column per horizon.
 
@@ -108,8 +122,11 @@ class FittedModel:
         self.curves: list[dict[str, np.ndarray]] = []
 
     def predict(self, X: np.ndarray) -> np.ndarray:
-        """Predict log returns, with one column per horizon."""
-        if self.spec.kind == "xgboost":
+        """Predict the target in log-return units, with one column per horizon."""
+        if self.spec.kind == "har":
+            inputs = _har_inputs(self.spec, X, self.feature_columns)
+            predictions = np.asarray(self.estimators[0].predict(inputs)).reshape(len(X), -1)
+        elif self.spec.kind == "xgboost":
             inputs = _tabular_inputs(self.spec, X, self.feature_columns)
             predictions = np.column_stack([estimator.predict(inputs) for estimator in self.estimators])
         else:
@@ -213,6 +230,19 @@ def _fit_xgboost(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
     return fitted
 
 
+def _fit_har(spec: ModelSpec, dataset: Dataset) -> FittedModel:
+    """Fit a linear HAR model on all known rows, since it has no use for early stopping."""
+    from sklearn.linear_model import LinearRegression
+
+    known = (dataset.train, dataset.stopping_split)
+    inputs = np.concatenate([_har_inputs(spec, split.X, dataset.feature_columns) for split in known])
+    targets = np.concatenate([split.y for split in known])
+    fitted = FittedModel(spec, [LinearRegression().fit(inputs, targets)], dataset.feature_columns)
+    fitted.best_steps = [1] * len(dataset.horizons)
+    fitted.steps_run = [1] * len(dataset.horizons)
+    return fitted
+
+
 def fit_model(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
     """Train one model. A standardized dataset also gets a standardized target."""
     target_mean, target_std = 0.0, 1.0
@@ -236,6 +266,8 @@ def fit_model(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
         fitted = _fit_recurrent(spec, dataset, seed)
     elif spec.kind == "xgboost":
         fitted = _fit_xgboost(spec, dataset, seed)
+    elif spec.kind == "har":
+        fitted = _fit_har(spec, dataset)
     else:
         raise ValueError(f"Unknown model kind {spec.kind!r}")
 
