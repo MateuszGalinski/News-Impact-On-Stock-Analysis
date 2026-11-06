@@ -26,7 +26,14 @@ from .data import (
 from .diagnostics import CURVE_MODELS, early_stopping_pick, learning_curves, summarize_curves
 from .experiment import ExperimentConfig, run_experiment
 from .models import UNIFIED_MODELS, UNIFIED_RECURRENT_PARAMS, UNIFIED_XGBOOST_PARAMS, ModelSpec, fit_model
-from .regularization import CONTROL, REGULARIZATION_MODELS, compare_to_control, split_model_names
+from .regularization import (
+    CONTROL,
+    REGULARIZATION_CURVE_MODELS,
+    REGULARIZATION_MODELS,
+    STRONGER_XGBOOST_LONG_PATIENCE,
+    compare_to_control,
+    split_model_names,
+)
 from .walk_forward import WalkForwardConfig, compare_tracks, run_walk_forward, walk_forward_intervals
 
 SPLITS = ("train", "validation", "test")
@@ -299,6 +306,21 @@ def check_regularization_candidates():
         # The reported curve must be plain MSE, even with a weight penalty.
         predicted = (fitted.predict(dataset.early_stopping.X) - target_mean) / target_std
         assert np.isclose(np.mean((predicted - scaled_y) ** 2), fitted.curves[0]["stopping"].min(), atol=1e-3), spec.name
+
+    changed = {
+        name
+        for name, value in STRONGER_XGBOOST_LONG_PATIENCE.params.items()
+        if value != REGULARIZATION_MODELS[-1].params[name]
+    }
+    assert changed == {"early_stopping_rounds"}, "only patience may differ from Stronger XGBoost"
+    assert STRONGER_XGBOOST_LONG_PATIENCE.params["early_stopping_rounds"] == 75
+
+    assert len(REGULARIZATION_CURVE_MODELS) == len(REGULARIZATION_MODELS)
+    for spec, patience in REGULARIZATION_CURVE_MODELS:
+        assert patience > 0 and "early_stopping_patience" not in spec.params and "early_stopping_rounds" not in spec.params
+        short = {"n_estimators": 5} if spec.kind == "xgboost" else {"epochs": 3}
+        fitted = fit_model(replace(spec, params={**spec.params, **short}), dataset, 42)
+        assert fitted.steps_run[0] == next(iter(short.values())), f"{spec.name} should run every step"
 
     names = split_model_names(pd.DataFrame({"model": ["LSTM | Dropout 0.2", f"RNN | {CONTROL}"]}))
     assert list(names["base_model"]) == ["LSTM", "RNN"] and list(names["candidate"]) == ["Dropout 0.2", CONTROL]

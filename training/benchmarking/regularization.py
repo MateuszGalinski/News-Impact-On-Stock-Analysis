@@ -4,11 +4,13 @@ Model names are "<base model> | <candidate>". The control is the unified model,
 read from its saved results using the same seeds, so it isn't retrained.
 """
 
+from dataclasses import replace
 from pathlib import Path
 
 import pandas as pd
 
 from .data import UNIFIED_TRACKS
+from .diagnostics import learning_curves
 from .experiment import ExperimentConfig, run_experiment
 from .models import UNIFIED_RECURRENT_PARAMS, UNIFIED_XGBOOST_PARAMS, ModelSpec
 from .walk_forward import WalkForwardConfig, compare_tracks, run_walk_forward
@@ -46,17 +48,43 @@ REGULARIZATION_MODELS = (
 )
 
 
-def run_regularization_walk_forward(results_path: Path) -> None:
-    """Run every candidate through walk-forward. Saved fits are skipped."""
+# The learning rate is 2.5 times lower than the control's, so patience is 2.5 times longer.
+STRONGER_XGBOOST_LONG_PATIENCE = ModelSpec(
+    "XGBoost | Stronger, patience 75",
+    "xgboost",
+    {**REGULARIZATION_MODELS[-1].params, "early_stopping_rounds": 75},
+)
+
+
+def _without_early_stopping(spec: ModelSpec) -> tuple[ModelSpec, int]:
+    """Return the candidate with early stopping off, and the patience it would have used."""
+    key = "early_stopping_rounds" if spec.kind == "xgboost" else "early_stopping_patience"
+    params = {name: value for name, value in spec.params.items() if name != key}
+    return replace(spec, params=params), spec.params[key]
+
+
+REGULARIZATION_CURVE_MODELS = tuple(_without_early_stopping(spec) for spec in REGULARIZATION_MODELS)
+REGULARIZATION_CURVE_SEEDS = (42,)
+
+
+def run_regularization_curves(results_path: Path) -> pd.DataFrame:
+    """Record every candidate's learning curves. Saved fits are skipped."""
+    return learning_curves(
+        models=REGULARIZATION_CURVE_MODELS, seeds=REGULARIZATION_CURVE_SEEDS, results_path=results_path
+    )
+
+
+def run_regularization_walk_forward(results_path: Path, models: tuple = REGULARIZATION_MODELS) -> None:
+    """Run candidates through walk-forward. Saved fits are skipped."""
     for track in UNIFIED_TRACKS:
         run_walk_forward(
-            WalkForwardConfig(track=track, models=REGULARIZATION_MODELS, seeds=REGULARIZATION_SEEDS),
+            WalkForwardConfig(track=track, models=models, seeds=REGULARIZATION_SEEDS),
             results_path,
         )
 
 
-def run_regularization_split(metrics_path: Path, predictions_path: Path) -> None:
-    """Run every candidate on the 80/10/10 split. Tracks already saved are skipped."""
+def run_regularization_split(metrics_path: Path, predictions_path: Path, models: tuple = REGULARIZATION_MODELS) -> None:
+    """Run candidates on the 80/10/10 split. Tracks already saved are skipped."""
     done = set(pd.read_csv(metrics_path, usecols=["track"])["track"]) if Path(metrics_path).exists() else set()
     for track in UNIFIED_TRACKS:
         if track in done:
@@ -64,7 +92,7 @@ def run_regularization_split(metrics_path: Path, predictions_path: Path) -> None
         result = run_experiment(
             ExperimentConfig(
                 track=track,
-                models=REGULARIZATION_MODELS,
+                models=models,
                 horizons=(1,),
                 seeds=REGULARIZATION_SEEDS,
                 common_dates=True,
@@ -100,14 +128,15 @@ def for_base_model(frame: pd.DataFrame, base_model: str) -> pd.DataFrame:
     return named.assign(model=named["candidate"]).drop(columns=["base_model", "candidate"])
 
 
-def compare_to_control(predictions: pd.DataFrame, base_model: str, **options) -> pd.DataFrame:
-    """Compare each candidate with its control, day by day, within each input set.
+def compare_to_control(predictions: pd.DataFrame, base_model: str, control: str = CONTROL, **options) -> pd.DataFrame:
+    """Compare each candidate with a control, day by day, within each input set.
 
     Positive differences favor the candidate. Uses `compare_tracks` with the
     candidates in place of tracks and the input sets in place of models.
     """
     rows = for_base_model(predictions, base_model)
     swapped = rows.rename(columns={"track": "model", "model": "track"})
-    candidates = [name for name in swapped["track"].unique() if name != CONTROL]
-    comparisons = tuple((f"{name} vs control", name, CONTROL) for name in candidates)
+    candidates = [name for name in swapped["track"].unique() if name != control]
+    label = "control" if control == CONTROL else control
+    comparisons = tuple((f"{name} vs {label}", name, control) for name in candidates)
     return compare_tracks(swapped, comparisons, **options).rename(columns={"model": "track"})

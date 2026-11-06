@@ -311,6 +311,76 @@ def plot_walk_forward_rounds(round_metrics: pd.DataFrame, title: str = "Walk-for
         plt.show()
 
 
+def plot_candidate_curves(
+    curves: pd.DataFrame,
+    control: str,
+    y_limits: tuple[float, float] = (0, 2.5),
+    panels_per_row: int = 4,
+    title: str | None = None,
+) -> None:
+    """Compare each candidate's learning curves with the control's, with one panel per candidate.
+
+    `curves` has the candidates as its model names. Thin lines are single fits
+    on the stopping slice, and thick lines are averages across fits. Losses are
+    relative to the baseline, so 1 means no better than always predicting the
+    training mean. Values above the limit run off the chart.
+    """
+    def average(rows: pd.DataFrame, column: str) -> pd.Series:
+        return rows.groupby("step")[column].mean()
+
+    control_stopping = average(curves[curves["model"] == control], "stopping_loss")
+    candidates = [name for name in curves["model"].unique() if name != control]
+    panels_per_row = min(panels_per_row, len(candidates))
+    row_count = int(np.ceil(len(candidates) / panels_per_row))
+    with plt.rc_context(CHART_STYLE):
+        fig, axes = plt.subplots(
+            row_count,
+            panels_per_row,
+            figsize=(13, 2.9 * row_count + 0.9),
+            sharex=True,
+            sharey=True,
+            squeeze=False,
+            layout="constrained",
+        )
+        for ax in axes.flat[len(candidates):]:
+            ax.set_visible(False)
+        for ax, candidate in zip(axes.flat, candidates):
+            rows = curves[curves["model"] == candidate]
+            for _, fit in rows.groupby(["track", "round", "seed"]):
+                ax.plot(fit["step"], fit["stopping_loss"], color=FITTED_COLOR, linewidth=0.6, alpha=0.3, zorder=1)
+            ax.plot(control_stopping.index, control_stopping, color=PRIMARY_INK, linewidth=1.5, zorder=3)
+            train = average(rows, "train_loss")
+            stopping = average(rows, "stopping_loss")
+            ax.plot(train.index, train, color=ACTUAL_COLOR, linewidth=2, zorder=3)
+            ax.plot(stopping.index, stopping, color=FITTED_COLOR, linewidth=2, zorder=4)
+            ax.axhline(1, color=PRIMARY_INK, linewidth=1, linestyle="--", zorder=2)
+            ax.set_ylim(*y_limits)
+            ax.set_title(candidate, loc="left", fontsize=11)
+            ax.grid(axis="y", color=GRID_COLOR, linewidth=0.6)
+            ax.set_axisbelow(True)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.tick_params(length=0, labelsize=9, labelbottom=True)
+            ax.set_xlabel("Trees" if curves["step"].max() > 200 else "Epochs")
+        for row_axes in axes:
+            row_axes[0].set_ylabel("Loss vs baseline")
+
+        fig.suptitle(title or "Learning curves by candidate", x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        fig.legend(
+            handles=[
+                plt.Line2D([], [], color=ACTUAL_COLOR, linewidth=2, label="Training data, average"),
+                plt.Line2D([], [], color=FITTED_COLOR, linewidth=2, label="Stopping slice, average"),
+                plt.Line2D([], [], color=FITTED_COLOR, linewidth=0.6, alpha=0.5, label="Stopping slice, each fit"),
+                plt.Line2D([], [], color=PRIMARY_INK, linewidth=1.5, label="Control's stopping slice, average"),
+                plt.Line2D([], [], color=PRIMARY_INK, linewidth=1, linestyle="--", label="Baseline"),
+            ],
+            loc="outside lower center",
+            ncols=5,
+            frameon=False,
+            fontsize=9,
+        )
+        plt.show()
+
+
 def plot_learning_curves(
     curves: pd.DataFrame,
     model: str,
@@ -360,7 +430,7 @@ def plot_learning_curves(
             row_axes[0].set_ylabel(f"Round {round_number}\nLoss vs baseline")
         for ax, track in zip(axes[0], tracks):
             ax.set_title(TRACK_TITLES.get(track, track), loc="left", fontsize=11)
-        step_name = "Trees" if model == "XGBoost" else "Epochs"
+        step_name = "Trees" if model.startswith("XGBoost") else "Epochs"
         for ax in axes[-1]:
             ax.set_xlabel(step_name)
 

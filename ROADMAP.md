@@ -78,11 +78,23 @@ Real progress means correlation clearly above zero, an R² interval reaching or 
 **Result (2026-11-06):** no candidate met the criteria, so there's no winner and no 5-seed rerun. On walk-forward, no seed of any of the 60 setups (including controls) beat the train-mean baseline on MSE, and every setup averaged below always-up (54.9%) on direction.
 
 - **Better scores came from flatter predictions:** across the 60 setups, narrower predictions go with better R² (rank correlation -0.91). 17 of the 48 comparisons with the control improve MSE, but that's the kind of gain the criteria rule out.
-- **Stronger XGBoost:** it has the best R², -0.0006 (95% interval -0.0043 to 0.0031) with no news and no features, but it's close to predicting the mean. Its spread is 0.05 of actual, about 92% of its predictions are up, and its correlation is at or below zero. That makes it a weak tool for testing features in 3b.
+- **Stronger XGBoost:** it has the best R², -0.0006 (95% interval -0.0043 to 0.0031) with no news and no features, but it's close to predicting the mean. Its spread is 0.05 of actual, about 92% of its predictions are up, and its correlation is at or below zero. That makes it a weak tool for testing features in 3b. Its patience stopped it early, but the rerun below shows longer patience is worse.
 - **Depth:** the 2-layer LSTM didn't help, and was much worse on no news with indicators, at -0.123 (-0.246 to -0.035).
 - **A weak lead in the RNNs:** 9 of 60 correlation intervals are above zero, and all 9 are RNNs. The best control is no news with indicators, at 0.087 (0.021 to 0.156). It's positive in all 8 rounds and doesn't depend on the largest moves. Its R² is still -0.047, partly because its predictions are too wide, and it was picked from 60 setups. Shrinking its predictions by the best amount in hindsight gives an R² of about +0.008, which isn't a fair result.
 - **News vs no news:** in the 15 comparisons, news was never better on MSE or direction. It was worse on MSE in 7 (5 RNN, 2 LSTM) and on direction in 1. With these 3 seeds, the RNN control's MSE and the XGBoost control's direction are worse with news, but both intervals included zero with 5 seeds, so individual results depend on the seeds.
 - **80/10/10:** 19 of the 20 best setups have no news. The best is the LSTM with dropout 0.2 on no news with indicators, with R² 0.022 and direction at 54.5% against 55.3% for always-up.
+
+**Learning curves (2026-11-06):** `training/benchmarking/notebooks/regularization_curves.ipynb` ran every candidate with early stopping off, on rounds 1, 4 and 8, with 1 seed. Some candidates clearly reduce overfitting, but none shows clear learning on unseen days.
+
+- **Overfitting:** by the last epoch, dropout 0.5 cuts stopping-slice loss from 1.92 to 1.07 times the baseline for the RNN, and from 4.12 to 1.09 for the LSTM. Dropout 0.2 and the smaller network help less. The L2 settings tested do almost nothing, and the 2-layer LSTM still reaches 3.39.
+- **Learning:** at early stopping's pick, every candidate averages 0.98-1.05 on the stopping slice. Being below 1 there doesn't carry over: the XGBoost control is below 1 in all 12 fits, but its walk-forward R² is about -0.03.
+- **Stronger XGBoost:** a patience of 30 trees is too short for a learning rate of 0.02. It picks about 29 trees on average, while in rounds 4 and 8 the loss reaches its lowest after about 400-470 trees. Replaying the curves with a patience of 75 gives about 235 trees, and a stopping-slice loss of 0.974 instead of 0.996. Round 1 gets worse with more trees. The scored-day test is below.
+
+**Stronger XGBoost with a patience of 75 (2026-11-06):** `training/benchmarking/notebooks/regularization_patience.ipynb` reran that candidate with one change, using the same seeds. Longer patience made it worse, so short patience wasn't hiding signal, and step 3a still has no winner.
+
+- **Walk-forward:** R² is worse than with a patience of 30 on all 4 input sets, at -0.0075 to -0.0149, and no interval reaches zero. Correlation is -0.030 to -0.042, and every interval includes zero. Direction is 52.4-53.2%, below always-up (54.9%).
+- **Stopping-slice gains didn't carry over:** rounds 4 and 8 trained for the most extra trees, but got worse on scored days. Round 4's R² goes from 0.0002 to -0.027, and round 8's from -0.019 to -0.050.
+- **80/10/10:** both settings pick the same trees in all 12 fits, so this split can't separate them.
 
 ### 3b. Feature composition test
 
