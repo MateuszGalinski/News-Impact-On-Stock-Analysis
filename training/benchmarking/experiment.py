@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 
+import numpy as np
 import pandas as pd
 
 from .data import prepare_dataset
@@ -11,7 +12,8 @@ from .models import NOTEBOOK_MODELS, ModelSpec, fit_model
 class ExperimentConfig:
     """One experiment. `models` defaults to the track's notebook models.
 
-    common_dates and standardize are described in `prepare_dataset`.
+    common_dates, standardize and early_stopping_fraction are described in
+    `prepare_dataset`.
     """
 
     track: str
@@ -23,6 +25,7 @@ class ExperimentConfig:
     validation_fraction: float = 0.1
     common_dates: bool = False
     standardize: bool = False
+    early_stopping_fraction: float | None = None
 
 
 def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> dict:
@@ -48,8 +51,12 @@ def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> 
         validation_fraction=config.validation_fraction,
         common_dates=config.common_dates,
         standardize=config.standardize,
+        early_stopping_fraction=config.early_stopping_fraction,
     )
     specs = config.models if config.models is not None else NOTEBOOK_MODELS[config.track]
+    known_targets = dataset.train.y
+    if dataset.early_stopping is not None:
+        known_targets = np.concatenate([dataset.train.y, dataset.early_stopping.y])
 
     splits = {"train": dataset.train, "validation": dataset.validation}
     if evaluate_test:
@@ -67,7 +74,7 @@ def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> 
             for split_name, split in splits.items():
                 predicted = fitted.predict(split.X)
                 for index, horizon in enumerate(config.horizons):
-                    baseline = dataset.train.y[:, index].mean()
+                    baseline = known_targets[:, index].mean()
                     labels = {
                         "track": config.track,
                         "model": spec.name,
@@ -79,6 +86,8 @@ def run_experiment(config: ExperimentConfig, *, evaluate_test: bool = False) -> 
                         {
                             **labels,
                             **score_predictions(split.y[:, index], predicted[:, index], baseline),
+                            "best_step": fitted.best_steps[index],
+                            "steps_run": fitted.steps_run[index],
                         }
                     )
                     prediction_frames.append(

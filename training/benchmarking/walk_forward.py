@@ -11,11 +11,27 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .data import load_track_rows, prepare_walk_forward_round, split_sizes
+from .data import (
+    NEWS_WITH_FEATURES,
+    NEWS_WITH_FEATURES_AND_TECH,
+    NO_NEWS_NO_FEATURES,
+    NO_NEWS_WITH_FEATURES,
+    load_track_rows,
+    prepare_walk_forward_round,
+    split_sizes,
+)
 from .metrics import score_predictions
 from .models import NOTEBOOK_MODELS, ModelSpec, fit_model
 
 PREDICTION_KEYS = ["track", "model", "seed", "round"]
+
+# (label, first track, second track). A positive difference favors the first.
+TRACK_COMPARISONS = (
+    ("News vs no news, no features", NEWS_WITH_FEATURES, NO_NEWS_NO_FEATURES),
+    ("Indicators vs no news, no features", NO_NEWS_WITH_FEATURES, NO_NEWS_NO_FEATURES),
+    ("News + indicators vs indicators", NEWS_WITH_FEATURES_AND_TECH, NO_NEWS_WITH_FEATURES),
+    ("News + indicators vs news", NEWS_WITH_FEATURES_AND_TECH, NEWS_WITH_FEATURES),
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +94,8 @@ def _round_predictions(config, spec, seed, round_number, dataset) -> pd.DataFram
                 "predicted": predicted[:, index],
                 # The baseline can use every target known when the round starts.
                 "baseline": known_targets[:, index].mean(),
+                "best_step": fitted.best_steps[index],
+                "steps_run": fitted.steps_run[index],
             }
         )
         for index, horizon in enumerate(config.horizons)
@@ -172,6 +190,78 @@ def _bootstrap_indices(day_count: int, samples: int, mean_block_days: int, rng) 
     return indices
 
 
+def _daily_scores(rows: pd.DataFrame) -> pd.DataFrame:
+    """Average one model's error and direction across seeds, per day."""
+    return (
+        rows.assign(
+            error=(rows["actual"] - rows["predicted"]) ** 2,
+            baseline_error=(rows["actual"] - rows["baseline"]) ** 2,
+            correct=np.sign(rows["predicted"]) == np.sign(rows["actual"]),
+            up=rows["actual"] > 0,
+        )
+        .groupby("date", sort=True)[["error", "baseline_error", "correct", "up"]]
+        .mean()
+    )
+
+
+def compare_tracks(
+    predictions: pd.DataFrame,
+    comparisons: tuple = TRACK_COMPARISONS,
+    *,
+    mean_block_days: int = 20,
+    samples: int = 2000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Compare the same model on two tracks, day by day.
+
+    The same days are resampled for both tracks, so the intervals reflect the
+    difference between them. Positive differences favor the first track:
+    mse_improvement is the second track's MSE minus the first's, and
+    direction_gain is the first track's accuracy minus the second's, in points.
+    An interval that includes 0 means the tracks can't be told apart.
+    """
+    rng = np.random.default_rng(seed)
+    tail = 100 * (1 - confidence) / 2
+    rows = []
+    for label, first_track, second_track in comparisons:
+        first_rows = predictions[predictions["track"] == first_track]
+        second_rows = predictions[predictions["track"] == second_track]
+        for (model, horizon), first_group in first_rows.groupby(["model", "horizon"], sort=False):
+            second_group = second_rows[(second_rows["model"] == model) & (second_rows["horizon"] == horizon)]
+            first = _daily_scores(first_group)
+            second = _daily_scores(second_group)
+            if not first.index.equals(second.index):
+                raise ValueError(f"{label}: {model} isn't scored on the same days on both tracks")
+
+            indices = _bootstrap_indices(len(first), samples, mean_block_days, rng)
+            error_difference = second["error"].to_numpy() - first["error"].to_numpy()
+            correct_difference = 100 * (first["correct"].to_numpy() - second["correct"].to_numpy())
+            mse_samples = error_difference[indices].mean(axis=1)
+            direction_samples = correct_difference[indices].mean(axis=1)
+            rows.append(
+                {
+                    "comparison": label,
+                    "first_track": first_track,
+                    "second_track": second_track,
+                    "model": model,
+                    "horizon": horizon,
+                    "days": len(first),
+                    "mse_first": first["error"].mean(),
+                    "mse_second": second["error"].mean(),
+                    "mse_improvement": error_difference.mean(),
+                    "mse_improvement_lower": np.percentile(mse_samples, tail),
+                    "mse_improvement_upper": np.percentile(mse_samples, 100 - tail),
+                    "accuracy_first": first["correct"].mean(),
+                    "accuracy_second": second["correct"].mean(),
+                    "direction_gain": correct_difference.mean(),
+                    "direction_gain_lower": np.percentile(direction_samples, tail),
+                    "direction_gain_upper": np.percentile(direction_samples, 100 - tail),
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def walk_forward_intervals(
     predictions: pd.DataFrame,
     *,
@@ -191,16 +281,7 @@ def walk_forward_intervals(
     tail = 100 * (1 - confidence) / 2
     rows = []
     for (track, model, horizon), group in predictions.groupby(["track", "model", "horizon"], sort=False):
-        daily = (
-            group.assign(
-                error=(group["actual"] - group["predicted"]) ** 2,
-                baseline_error=(group["actual"] - group["baseline"]) ** 2,
-                correct=np.sign(group["predicted"]) == np.sign(group["actual"]),
-                up=group["actual"] > 0,
-            )
-            .groupby("date", sort=True)[["error", "baseline_error", "correct", "up"]]
-            .mean()
-        )
+        daily = _daily_scores(group)
         error, baseline_error = daily["error"].to_numpy(), daily["baseline_error"].to_numpy()
         correct, up = daily["correct"].to_numpy(), daily["up"].to_numpy()
 

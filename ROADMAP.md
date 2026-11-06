@@ -1,6 +1,6 @@
 # Roadmap
 
-Agreed plan as of 2026-11-06. Step 1 is built and has had its first run. Steps 2 to 5 haven't started.
+Agreed plan as of 2026-11-06. Steps 1 and 2 are built and have been run. Steps 3 to 5 haven't started.
 
 **Project aim:** show how unstructured data (news) can be combined with structured data (prices), and how well RAG suits that task.
 
@@ -34,6 +34,19 @@ No API cost.
 - Use one standardized LSTM and one XGBoost, with the same setup on every track. From here we compare inputs, not architectures.
 - Retire XGBoost v2's separate settings. Drop the RNN from the comparison unless walk-forward gives a reason to keep it.
 - Run early stopping on its own slice from the end of each training period, not on the data being scored. This removes the optimism in XGBoost v2's current result.
+
+**What was built:** results are in `training/benchmarking/notebooks/unified_models.ipynb`.
+
+- One XGBoost setup (v2's settings, full 30-day windows), and early stopping for RNN, LSTM and XGBoost. The RNN was kept.
+- A fourth input set, `news_with_feature_engineering_and_tech`, because the existing news track has no technical indicators. News vs no news, no features is therefore the clean test of news.
+- Both evaluations: walk-forward (781 days) as the stronger evidence, and 80/10/10 (123 validation days) as a second view.
+- Direct day-by-day comparisons between input sets, for each model.
+
+**Result (2026-11-06):**
+
+- **Against the baseline:** on walk-forward, no seed of any of the 12 setups beat the train-mean baseline on MSE, and every setup averaged below always-up (54.9%) on direction. The best is news and indicators with XGBoost, with out-of-sample R² of -0.020 (95% interval -0.036 to -0.006).
+- **News vs no news:** on walk-forward, all three models' MSE and direction intervals include zero in the main comparison, so news shows no detectable benefit or harm. On 80/10/10, the LSTM and RNN are worse on direction with news, and the LSTM is worse on MSE. XGBoost shows no difference.
+- **Early stopping:** it cut the worst MSE losses, but predictions are flatter (spread 0.11-0.31 of actual) and correlation with actual returns is about zero. Many fits barely train: on the news input sets, the LSTM's best epoch is within the first 3 in 75% of walk-forward fits, and is epoch 1 in about 40-50%.
 
 ## 3. A stronger news baseline
 

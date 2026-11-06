@@ -16,7 +16,9 @@ NEWS_PATH = DATA_DIR / "data_gnews_api" / "nvidia_news.csv"
 NO_NEWS_NO_FEATURES = "no_news_no_feature_engineering"
 NO_NEWS_WITH_FEATURES = "no_news_with_feature_engineering"
 NEWS_WITH_FEATURES = "news_with_feature_engineering"
+NEWS_WITH_FEATURES_AND_TECH = "news_with_feature_engineering_and_tech"
 TRACKS = (NO_NEWS_NO_FEATURES, NO_NEWS_WITH_FEATURES, NEWS_WITH_FEATURES)
+UNIFIED_TRACKS = (*TRACKS, NEWS_WITH_FEATURES_AND_TECH)
 
 TARGET_COLUMN = "LOG_CLOSE_RETURN"
 CYCLICAL_COLUMNS = ["sin_doy", "cos_doy", "sin_month", "cos_month", "sin_dow", "cos_dow"]
@@ -50,6 +52,7 @@ class Dataset:
 
     standardized: inputs are already standardized, and `fit_model` trains on a
         standardized target and converts predictions back to log returns.
+    early_stopping: data for early stopping when it's separate from `validation`.
     """
 
     track: str
@@ -59,6 +62,12 @@ class Dataset:
     validation: WindowedSplit
     test: WindowedSplit
     standardized: bool = False
+    early_stopping: WindowedSplit | None = None
+
+    @property
+    def stopping_split(self) -> WindowedSplit:
+        """The split that early stopping scores against."""
+        return self.validation if self.early_stopping is None else self.early_stopping
 
 
 def load_stock(path: Path = STOCK_PATH) -> pd.DataFrame:
@@ -182,12 +191,16 @@ def build_track_frame(track: str) -> tuple[pd.DataFrame, list[str], list[str]]:
     elif track == NEWS_WITH_FEATURES:
         features = [TARGET_COLUMN, *CYCLICAL_COLUMNS, *NEWS_COLUMNS]
         scaled = SCALED_NEWS_COLUMNS
+    elif track == NEWS_WITH_FEATURES_AND_TECH:
+        stock = add_technical_features(stock)
+        features = [TARGET_COLUMN, *TECHNICAL_COLUMNS, *CYCLICAL_COLUMNS, *NEWS_COLUMNS]
+        scaled = SCALED_NEWS_COLUMNS
     else:
-        raise ValueError(f"Unknown track {track!r}, expected one of {TRACKS}")
+        raise ValueError(f"Unknown track {track!r}, expected one of {UNIFIED_TRACKS}")
 
     stock = stock.dropna().reset_index(drop=True)
     stock = add_cyclical_features(stock)
-    if track == NEWS_WITH_FEATURES:
+    if track in (NEWS_WITH_FEATURES, NEWS_WITH_FEATURES_AND_TECH):
         stock = add_news_features(stock).sort_values("DATE").reset_index(drop=True)
     return stock, features, scaled
 
@@ -215,7 +228,7 @@ def load_track_rows(track: str, *, common_dates: bool = False) -> tuple[pd.DataF
     have been calculated on the full price history.
     """
     frame, features, scaled = build_track_frame(track)
-    if common_dates and track != NEWS_WITH_FEATURES:
+    if common_dates and track not in (NEWS_WITH_FEATURES, NEWS_WITH_FEATURES_AND_TECH):
         frame = _restrict_to_news_dates(frame)
     return frame, features, scaled
 
@@ -285,6 +298,7 @@ def prepare_dataset(
     validation_fraction: float = 0.1,
     common_dates: bool = False,
     standardize: bool = False,
+    early_stopping_fraction: float | None = None,
 ) -> Dataset:
     """Build a track's windows from a chronological train/validation/test split.
 
@@ -293,7 +307,13 @@ def prepare_dataset(
         full price history.
     standardize: standardize the inputs using training rows only. Cyclical date
         features stay as they are because they're already between -1 and 1.
+    early_stopping_fraction: keep this share of the end of the training rows for
+        early stopping, so models don't stop on the data they're scored on. The
+        slice's inputs can use the previous `window_days` rows. Models and
+        scaling are fit on the rows before it.
     """
+    if early_stopping_fraction is not None and not 0 < early_stopping_fraction < 1:
+        raise ValueError("early_stopping_fraction must be between 0 and 1")
     if not horizons or any(horizon <= 0 for horizon in horizons):
         raise ValueError("horizons must contain positive integers")
     if len(set(horizons)) != len(horizons):
@@ -308,19 +328,29 @@ def prepare_dataset(
     validation = frame.iloc[train_size:train_size + validation_size].copy()
     test = frame.iloc[train_size + validation_size:].copy()
 
+    fit_size = train_size
+    if early_stopping_fraction is not None:
+        fit_size -= int(train_size * early_stopping_fraction)
+
     if scaled:
-        scaler = StandardScaler().fit(train[scaled])
+        scaler = StandardScaler().fit(train.iloc[:fit_size][scaled])
         for split in (train, validation, test):
             split[scaled] = scaler.transform(split[scaled])
 
-    train_windows = make_windows(train, features, window_days, horizons)
+    train_windows = make_windows(train.iloc[:fit_size], features, window_days, horizons)
     validation_windows = make_windows(validation, features, window_days, horizons)
     test_windows = make_windows(test, features, window_days, horizons)
+    stopping_windows = None
+    if early_stopping_fraction is not None:
+        stopping_windows = make_windows(train.iloc[fit_size - window_days:], features, window_days, horizons)
 
     if standardize:
+        fit_rows = train.iloc[:fit_size]
         train_windows, validation_windows, test_windows = _standardize_all(
-            train, features, scaled, [train_windows, validation_windows, test_windows]
+            fit_rows, features, scaled, [train_windows, validation_windows, test_windows]
         )
+        if stopping_windows is not None:
+            stopping_windows = _standardize_all(fit_rows, features, scaled, [stopping_windows])[0]
 
     return Dataset(
         track=track,
@@ -330,6 +360,7 @@ def prepare_dataset(
         validation=validation_windows,
         test=test_windows,
         standardized=standardize,
+        early_stopping=stopping_windows,
     )
 
 

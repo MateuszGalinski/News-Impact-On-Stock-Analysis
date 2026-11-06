@@ -54,6 +54,8 @@ Each folder under `training/` is one track, kept comparable to the others. The n
 
 Two more approaches are planned in `README.md` but don't exist yet: `news_features_from_rag` and `news_shaped_based_rag`. The agreed order of work is in `ROADMAP.md`.
 
+The benchmarking pipeline also has a fourth input set with no folder of its own, `news_with_feature_engineering_and_tech`, in `UNIFIED_TRACKS`. The existing news track has no technical indicators. `TRACKS` stays at 3 so older notebook loops keep working.
+
 The real code is in each track's `notebooks/training_exploration.ipynb`, and shared logic such as `make_windows` is copied between notebooks rather than imported. These files are empty placeholders: every track's `model.py` and `training/preprocessing/__init__.py`.
 
 `training/benchmarking/` holds a shared pipeline for comparing variants: `data.py` builds each track's features and windows, `models.py` defines the models, and `experiment.py` has `run_experiment(ExperimentConfig(...))`, which only scores the test split with `evaluate_test=True`. `ExperimentConfig` can also limit every track to the news track's dates (`common_dates=True`) and standardize inputs and target using training rows only (`standardize=True`). Both are off by default to match the notebooks. Runs are compared in `notebooks/model_comparison.ipynb`, with results saved to `results/`.
@@ -62,6 +64,7 @@ The real code is in each track's `notebooks/training_exploration.ipynb`, and sha
 
 ```powershell
 python -m training.benchmarking.check_walk_forward
+python -m training.benchmarking.check_unified_models
 ```
 
 After changing the pipeline's data or default model behaviour, confirm it still reproduces the notebooks (no API calls or cost):
