@@ -1,6 +1,6 @@
 # Roadmap
 
-Agreed plan as of 2026-11-06. Steps 1 and 2 are built and have been run. Steps 3 to 5 haven't started.
+Agreed plan as of 2026-11-06. Steps 1, 2 and 3a are built and have been run. Steps 3b, 4 and 5 haven't started.
 
 **Project aim:** show how unstructured data (news) can be combined with structured data (prices), and how well RAG suits that task.
 
@@ -55,20 +55,49 @@ No API cost.
 - **Input sets:** the news LSTMs pick about epochs 1-2, compared with about 9-13 for the no-news LSTMs, and they never get below the baseline on the stopping slice on average.
 - **XGBoost:** it stays close to the baseline on the stopping slice, about 0.94-1.14 by the last tree, without the sharp rise. Its best points are slightly below 1, but they're chosen on that same slice and didn't carry over to the scored days.
 
-## 3. A stronger news baseline
+## 3. A stronger baseline
 
-The news track overfits, with train R² of about 0.30 against about -0.12 on validation for the LSTM. It has 7 news features across a 30-day window, so 210 news values per sample, and neighboring days share 4 of their 5 days of news. The winner becomes the control for RAG.
+The learning curves show overfitting, so this step controls that first, then tests which news features matter. The winner becomes the control for RAG.
 
-Compare these options, using the existing cache only, with no LLM reruns:
+### 3a. Regularization test
 
-| Option | News inputs per sample | What it tests |
+`training/benchmarking/notebooks/regularization.ipynb`, using 3 seeds on walk-forward and 80/10/10. The unified models are the control, and every candidate keeps early stopping.
+
+| Candidate | Change | Models |
 |---|---|---|
-| All 7 features across the window (current) | 210 | The control |
-| Fewer features (example: sentiment, materiality, article count) | 90 | Whether some features are mostly noise |
-| All 7 features, last day only | 7 | Whether the news history adds anything |
-| All 7 features, with dropout and early stopping | 210 | Whether the problem is training rather than the inputs |
+| Dropout 0.2 | Mild dropout in the recurrent layer | RNN, LSTM |
+| Dropout 0.5 | Strong dropout in the recurrent layer | RNN, LSTM |
+| L2 0.0001 | Mild weight penalty | RNN, LSTM |
+| L2 0.001 | Stronger weight penalty | RNN, LSTM |
+| Smaller network | 16 recurrent units and Dense(8) | RNN, LSTM |
+| 2-layer LSTM | Layers of 64 and 32 units, as a test of depth | LSTM |
+| Stronger XGBoost | Depth 2, learning rate 0.02, row and column sampling 0.5, `reg_lambda` 10, `min_child_weight` 10 | XGBoost |
 
-Fix the exact feature subset before seeing results. Keep the rolling window, one-day shift and after-close rule as they are.
+Real progress means correlation clearly above zero, an R² interval reaching or crossing zero, and direction closer to or above always-up. Wider predictions, or better MSE from flatter predictions, aren't enough. A winner needs a 5-seed rerun before it's trusted.
+
+**Result (2026-11-06):** no candidate met the criteria, so there's no winner and no 5-seed rerun. On walk-forward, no seed of any of the 60 setups (including controls) beat the train-mean baseline on MSE, and every setup averaged below always-up (54.9%) on direction.
+
+- **Better scores came from flatter predictions:** across the 60 setups, narrower predictions go with better R² (rank correlation -0.91). 17 of the 48 comparisons with the control improve MSE, but that's the kind of gain the criteria rule out.
+- **Stronger XGBoost:** it has the best R², -0.0006 (95% interval -0.0043 to 0.0031) with no news and no features, but it's close to predicting the mean. Its spread is 0.05 of actual, about 92% of its predictions are up, and its correlation is at or below zero. That makes it a weak tool for testing features in 3b.
+- **Depth:** the 2-layer LSTM didn't help, and was much worse on no news with indicators, at -0.123 (-0.246 to -0.035).
+- **A weak lead in the RNNs:** 9 of 60 correlation intervals are above zero, and all 9 are RNNs. The best control is no news with indicators, at 0.087 (0.021 to 0.156). It's positive in all 8 rounds and doesn't depend on the largest moves. Its R² is still -0.047, partly because its predictions are too wide, and it was picked from 60 setups. Shrinking its predictions by the best amount in hindsight gives an R² of about +0.008, which isn't a fair result.
+- **News vs no news:** in the 15 comparisons, news was never better on MSE or direction. It was worse on MSE in 7 (5 RNN, 2 LSTM) and on direction in 1. With these 3 seeds, the RNN control's MSE and the XGBoost control's direction are worse with news, but both intervals included zero with 5 seeds, so individual results depend on the seeds.
+- **80/10/10:** 19 of the 20 best setups have no news. The best is the LSTM with dropout 0.2 on no news with indicators, with R² 0.022 and direction at 54.5% against 55.3% for always-up.
+
+### 3b. Feature composition test
+
+A separate test, run after 3a on the best stable setup, using the cached news features with no LLM reruns. It replaces testing one hand-picked subset of features, which could give a false positive or a false negative and wrongly close the question.
+
+| Part | What it tests |
+|---|---|
+| Each feature group alone | Whether a group carries anything by itself |
+| All news minus one group | Whether removing a group changes anything |
+| Shuffled news (placebo) | What chance looks like. Real news must clearly beat it before any feature finding is believed |
+
+- **Groups, fixed before seeing results:** sentiment (mean, confidence, disagreement), event importance (materiality, surprise, guidance change), and news volume (article count).
+- **Also consider:** the LLM's event type and time horizon fields, which the models don't use yet. Check that they're in the cache first.
+- **Last-day news:** test it here too, as an alternative to the full window.
+- **A negative result** applies only to these features, target and models. It doesn't rule out better news features, such as ones from RAG.
 
 ## 4. Pretraining on other companies
 

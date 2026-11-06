@@ -46,6 +46,8 @@ class ModelSpec:
     params: Keras settings as in RECURRENT_PARAMS, or XGBRegressor arguments.
         Adding early_stopping_patience to the Keras settings stops training
         after that many epochs without improvement and restores the best weights.
+        units can be a tuple for stacked recurrent layers. dropout applies
+        inside each recurrent layer, and l2 penalizes every layer's weights.
     news_last_only: for XGBoost, use the full window for price features but
         only the last day's value for news features.
     """
@@ -122,21 +124,39 @@ def _fit_recurrent(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
     params = {**RECURRENT_PARAMS, **spec.params}
     recurrent_layers = {"rnn": layers.SimpleRNN, "lstm": layers.LSTM}
 
+    units = params["units"] if isinstance(params["units"], tuple) else (params["units"],)
+    dropout = params.get("dropout", 0.0)
+    penalty = keras.regularizers.L2(params["l2"]) if "l2" in params else None
+
     keras.utils.set_random_seed(seed)
     model = keras.Sequential(
         [
             layers.Input(shape=dataset.train.X.shape[1:]),
-            recurrent_layers[spec.kind](params["units"]),
-            layers.Dense(params["dense_units"], activation="relu"),
-            layers.Dense(len(dataset.horizons)),
+            *(
+                recurrent_layers[spec.kind](
+                    count,
+                    dropout=dropout,
+                    kernel_regularizer=penalty,
+                    return_sequences=index < len(units) - 1,
+                )
+                for index, count in enumerate(units)
+            ),
+            layers.Dense(params["dense_units"], activation="relu", kernel_regularizer=penalty),
+            layers.Dense(len(dataset.horizons), kernel_regularizer=penalty),
         ]
     )
-    model.compile(optimizer="adam", loss="mse")
+    # A weight penalty is added to the loss, so stop and report on plain MSE instead.
+    loss_name = "loss"
+    if penalty is None:
+        model.compile(optimizer="adam", loss="mse")
+    else:
+        model.compile(optimizer="adam", loss="mse", metrics=["mse"])
+        loss_name = "mse"
     patience = params.get("early_stopping_patience")
     callbacks = []
     if patience is not None:
         callbacks.append(
-            keras.callbacks.EarlyStopping(monitor="val_loss", patience=patience, restore_best_weights=True)
+            keras.callbacks.EarlyStopping(monitor=f"val_{loss_name}", patience=patience, restore_best_weights=True)
         )
     stopping = dataset.stopping_split
     history = model.fit(
@@ -149,11 +169,12 @@ def _fit_recurrent(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
         verbose=0,
     )
     fitted = FittedModel(spec, [model], dataset.feature_columns)
-    steps_run = len(history.history["val_loss"])
-    best_step = int(np.argmin(history.history["val_loss"])) + 1 if patience is not None else steps_run
+    stopping_losses = history.history[f"val_{loss_name}"]
+    steps_run = len(stopping_losses)
+    best_step = int(np.argmin(stopping_losses)) + 1 if patience is not None else steps_run
     fitted.best_steps = [best_step] * len(dataset.horizons)
     fitted.steps_run = [steps_run] * len(dataset.horizons)
-    curve = {"train": np.array(history.history["loss"]), "stopping": np.array(history.history["val_loss"])}
+    curve = {"train": np.array(history.history[loss_name]), "stopping": np.array(stopping_losses)}
     fitted.curves = [curve] * len(dataset.horizons)
     return fitted
 

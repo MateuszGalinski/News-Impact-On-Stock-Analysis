@@ -26,6 +26,7 @@ from .data import (
 from .diagnostics import CURVE_MODELS, early_stopping_pick, learning_curves, summarize_curves
 from .experiment import ExperimentConfig, run_experiment
 from .models import UNIFIED_MODELS, UNIFIED_RECURRENT_PARAMS, UNIFIED_XGBOOST_PARAMS, ModelSpec, fit_model
+from .regularization import CONTROL, REGULARIZATION_MODELS, compare_to_control, split_model_names
 from .walk_forward import WalkForwardConfig, compare_tracks, run_walk_forward, walk_forward_intervals
 
 SPLITS = ("train", "validation", "test")
@@ -274,6 +275,51 @@ def check_learning_curves():
     print("[PASS] curves record each step, and the pick matches early stopping's real choice")
 
 
+def check_regularization_candidates():
+    assert len(REGULARIZATION_MODELS) == 12, "5 candidates for RNN and LSTM, plus the 2-layer LSTM and XGBoost"
+    assert len({spec.name for spec in REGULARIZATION_MODELS}) == 12
+    dataset = prepare_dataset(NO_NEWS_WITH_FEATURES, common_dates=True, standardize=True, early_stopping_fraction=0.1)
+    poisoned = replace(dataset, validation=_poison(dataset.validation), test=_poison(dataset.test))
+    target_mean, target_std = dataset.train.y.mean(axis=0), dataset.train.y.std(axis=0)
+    scaled_y = (dataset.early_stopping.y - target_mean) / target_std
+
+    control = fit_model(ModelSpec("LSTM", "lstm", {**UNIFIED_RECURRENT_PARAMS, "epochs": 2}), dataset, 42)
+    baseline_inputs = dataset.validation.X
+    for spec in REGULARIZATION_MODELS:
+        if spec.kind == "xgboost":
+            params = {**spec.params, "n_estimators": 20}
+        else:
+            params = {**spec.params, "epochs": 2}
+        short = replace(spec, params=params)
+        fitted = fit_model(short, dataset, 42)
+        assert np.array_equal(fitted.predict(baseline_inputs), fit_model(short, poisoned, 42).predict(baseline_inputs)), spec.name
+        assert fitted.best_steps[0] <= fitted.steps_run[0]
+        if spec.kind != "xgboost":
+            assert not np.array_equal(fitted.predict(baseline_inputs), control.predict(baseline_inputs)), spec.name
+        # The reported curve must be plain MSE, even with a weight penalty.
+        predicted = (fitted.predict(dataset.early_stopping.X) - target_mean) / target_std
+        assert np.isclose(np.mean((predicted - scaled_y) ** 2), fitted.curves[0]["stopping"].min(), atol=1e-3), spec.name
+
+    names = split_model_names(pd.DataFrame({"model": ["LSTM | Dropout 0.2", f"RNN | {CONTROL}"]}))
+    assert list(names["base_model"]) == ["LSTM", "RNN"] and list(names["candidate"]) == ["Dropout 0.2", CONTROL]
+
+    dates = pd.date_range("2024-01-01", periods=60).astype(str)
+    rows = []
+    for name, offset in ((f"LSTM | {CONTROL}", 0.05), ("LSTM | Dropout 0.2", 0.0)):
+        rows.append(
+            pd.DataFrame(
+                {
+                    "track": TRACKS[0], "model": name, "seed": 1, "horizon": 1, "date": dates,
+                    "actual": np.resize([0.01, -0.01], 60), "predicted": np.resize([0.01, -0.01], 60) + offset,
+                    "baseline": 0.0,
+                }
+            )
+        )
+    comparison = compare_to_control(pd.concat(rows, ignore_index=True), "LSTM", samples=50)
+    assert len(comparison) == 1 and comparison.iloc[0]["mse_improvement"] > 0
+    print("[PASS] all 12 candidates train, ignore scored days, and report plain MSE")
+
+
 def main():
     check_new_track()
     check_stopping_slice_on_split()
@@ -283,6 +329,7 @@ def main():
     check_comparisons()
     check_small_run()
     check_learning_curves()
+    check_regularization_candidates()
     print("\nALL CHECKS PASSED: the unified setup is ready")
 
 

@@ -25,6 +25,7 @@ from .walk_forward import (
     round_boundaries,
     run_walk_forward,
     score_walk_forward,
+    correlation_intervals,
     walk_forward_intervals,
 )
 
@@ -160,6 +161,9 @@ def check_end_to_end():
     assert len(intervals) == len(models)
     assert (intervals["oos_r2_lower"] <= intervals["oos_r2_upper"]).all()
     assert (intervals["direction_edge_lower"] <= intervals["direction_edge_upper"]).all()
+    correlations = correlation_intervals(predictions, samples=200)
+    assert len(correlations) == len(models)
+    assert (correlations["correlation_lower"] <= correlations["correlation_upper"]).all()
     print("[PASS] a small run trains, scores and builds intervals")
 
 

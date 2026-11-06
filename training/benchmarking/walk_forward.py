@@ -262,6 +262,40 @@ def compare_tracks(
     return pd.DataFrame(rows)
 
 
+def correlation_intervals(
+    predictions: pd.DataFrame,
+    *,
+    mean_block_days: int = 20,
+    samples: int = 2000,
+    confidence: float = 0.95,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Estimate each model's correlation with actual returns, with confidence intervals.
+
+    Predictions are averaged across seeds per day first, which usually gives a
+    higher correlation than the average of the seeds' own correlations.
+    """
+    rng = np.random.default_rng(seed)
+    tail = 100 * (1 - confidence) / 2
+    rows = []
+    for (track, model, horizon), group in predictions.groupby(["track", "model", "horizon"], sort=False):
+        daily = group.groupby("date", sort=True)[["actual", "predicted"]].mean()
+        actual, predicted = daily["actual"].to_numpy(), daily["predicted"].to_numpy()
+        indices = _bootstrap_indices(len(daily), samples, mean_block_days, rng)
+        resampled = np.array([np.corrcoef(actual[days], predicted[days])[0, 1] for days in indices])
+        rows.append(
+            {
+                "track": track,
+                "model": model,
+                "horizon": horizon,
+                "correlation": np.corrcoef(actual, predicted)[0, 1],
+                "correlation_lower": np.nanpercentile(resampled, tail),
+                "correlation_upper": np.nanpercentile(resampled, 100 - tail),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def walk_forward_intervals(
     predictions: pd.DataFrame,
     *,
