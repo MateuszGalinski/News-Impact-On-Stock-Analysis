@@ -89,6 +89,10 @@ class FittedModel:
 
     best_steps: the epochs or trees whose weights are used, per horizon.
     steps_run: the epochs or trees actually trained, per horizon.
+    curves: MSE per step, per horizon, as {"train": array, "stopping": array}.
+        Values are in the units the model trained on, so they're standardized
+        when the dataset is. Train values for neural networks are averages
+        across each epoch, as Keras reports them.
     """
 
     def __init__(self, spec: ModelSpec, estimators: list, feature_columns: tuple[str, ...]):
@@ -99,6 +103,7 @@ class FittedModel:
         self.target_std = 1.0
         self.best_steps: list[int] = []
         self.steps_run: list[int] = []
+        self.curves: list[dict[str, np.ndarray]] = []
 
     def predict(self, X: np.ndarray) -> np.ndarray:
         """Predict log returns, with one column per horizon."""
@@ -148,6 +153,8 @@ def _fit_recurrent(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
     best_step = int(np.argmin(history.history["val_loss"])) + 1 if patience is not None else steps_run
     fitted.best_steps = [best_step] * len(dataset.horizons)
     fitted.steps_run = [steps_run] * len(dataset.horizons)
+    curve = {"train": np.array(history.history["loss"]), "stopping": np.array(history.history["val_loss"])}
+    fitted.curves = [curve] * len(dataset.horizons)
     return fitted
 
 
@@ -164,12 +171,20 @@ def _fit_xgboost(spec: ModelSpec, dataset: Dataset, seed: int) -> FittedModel:
         estimator.fit(
             X_train,
             dataset.train.y[:, index],
-            eval_set=[(X_stopping, stopping.y[:, index])],
+            # Early stopping uses the last entry, so training can be recorded too.
+            eval_set=[(X_train, dataset.train.y[:, index]), (X_stopping, stopping.y[:, index])],
             verbose=False,
         )
         estimators.append(estimator)
     fitted = FittedModel(spec, estimators, dataset.feature_columns)
     fitted.steps_run = [estimator.get_booster().num_boosted_rounds() for estimator in estimators]
+    fitted.curves = [
+        {
+            "train": np.array(estimator.evals_result()["validation_0"]["rmse"]) ** 2,
+            "stopping": np.array(estimator.evals_result()["validation_1"]["rmse"]) ** 2,
+        }
+        for estimator in estimators
+    ]
     if "early_stopping_rounds" in spec.params:
         fitted.best_steps = [estimator.best_iteration + 1 for estimator in estimators]
     else:

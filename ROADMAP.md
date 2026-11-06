@@ -48,6 +48,13 @@ No API cost.
 - **News vs no news:** on walk-forward, all three models' MSE and direction intervals include zero in the main comparison, so news shows no detectable benefit or harm. On 80/10/10, the LSTM and RNN are worse on direction with news, and the LSTM is worse on MSE. XGBoost shows no difference.
 - **Early stopping:** it cut the worst MSE losses, but predictions are flatter (spread 0.11-0.31 of actual) and correlation with actual returns is about zero. Many fits barely train: on the news input sets, the LSTM's best epoch is within the first 3 in 75% of walk-forward fits, and is epoch 1 in about 40-50%.
 
+**Learning curves (2026-11-06):** `training/benchmarking/notebooks/learning_curves.ipynb` ran the unified models with early stopping off, on rounds 1, 4 and 8, with 2 seeds.
+
+- **Overfitting, not underfitting:** by the last step, training loss falls to about 0.003-0.10 of the baseline's on average in every round. RNN and LSTM loss on the stopping slice rises well above it, to about 1.9-2.0 and 2.7-6.5 times the baseline.
+- **More depth or training isn't the fix:** the models already fit their training data almost fully.
+- **Input sets:** the news LSTMs pick about epochs 1-2, compared with about 9-13 for the no-news LSTMs, and they never get below the baseline on the stopping slice on average.
+- **XGBoost:** it stays close to the baseline on the stopping slice, about 0.94-1.14 by the last tree, without the sharp rise. Its best points are slightly below 1, but they're chosen on that same slice and didn't carry over to the scored days.
+
 ## 3. A stronger news baseline
 
 The news track overfits, with train R² of about 0.30 against about -0.12 on validation for the LSTM. It has 7 news features across a 30-day window, so 210 news values per sample, and neighboring days share 4 of their 5 days of news. The winner becomes the control for RAG.

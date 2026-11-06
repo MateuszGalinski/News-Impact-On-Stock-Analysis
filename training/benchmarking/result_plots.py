@@ -311,6 +311,78 @@ def plot_walk_forward_rounds(round_metrics: pd.DataFrame, title: str = "Walk-for
         plt.show()
 
 
+def plot_learning_curves(
+    curves: pd.DataFrame,
+    model: str,
+    y_limits: tuple[float, float] = (0, 2),
+    title: str | None = None,
+) -> None:
+    """Plot one model's `learning_curves`, with a row per round and a column per track.
+
+    Losses are relative to the baseline, so 1 means no better than always
+    predicting the training mean. Values above the limit run off the chart.
+    """
+    rows = curves[curves["model"] == model]
+    tracks = _tracks_in(rows)
+    rounds = sorted(rows["round"].unique())
+    with plt.rc_context(CHART_STYLE):
+        fig, axes = plt.subplots(
+            len(rounds),
+            len(tracks),
+            figsize=(max(13, 4 * len(tracks)), 2.6 * len(rounds) + 0.9),
+            sharex=True,
+            sharey=True,
+            squeeze=False,
+            layout="constrained",
+        )
+        for row_axes, round_number in zip(axes, rounds):
+            for ax, track in zip(row_axes, tracks):
+                panel = rows[(rows["track"] == track) & (rows["round"] == round_number)]
+                for _, fit in panel.groupby("seed"):
+                    ax.plot(fit["step"], fit["train_loss"], color=ACTUAL_COLOR, linewidth=1.2, zorder=2)
+                    ax.plot(fit["step"], fit["stopping_loss"], color=FITTED_COLOR, linewidth=1.2, zorder=2)
+                    at_pick = fit[fit["step"] == fit["pick"].iloc[0]]
+                    ax.scatter(
+                        at_pick["step"],
+                        at_pick["stopping_loss"].clip(upper=y_limits[1]),
+                        s=42,
+                        color=PRIMARY_INK,
+                        edgecolors=SURFACE_COLOR,
+                        linewidths=1,
+                        zorder=4,
+                    )
+                ax.axhline(1, color=PRIMARY_INK, linewidth=1, linestyle="--", zorder=3)
+                ax.set_ylim(*y_limits)
+                ax.grid(axis="y", color=GRID_COLOR, linewidth=0.6)
+                ax.set_axisbelow(True)
+                ax.spines[["top", "right"]].set_visible(False)
+                ax.tick_params(length=0, labelsize=9)
+            row_axes[0].set_ylabel(f"Round {round_number}\nLoss vs baseline")
+        for ax, track in zip(axes[0], tracks):
+            ax.set_title(TRACK_TITLES.get(track, track), loc="left", fontsize=11)
+        step_name = "Trees" if model == "XGBoost" else "Epochs"
+        for ax in axes[-1]:
+            ax.set_xlabel(step_name)
+
+        fig.suptitle(title or f"{model}: learning curves", x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        fig.legend(
+            handles=[
+                plt.Line2D([], [], color=ACTUAL_COLOR, linewidth=1.5, label="Training data"),
+                plt.Line2D([], [], color=FITTED_COLOR, linewidth=1.5, label="Stopping slice"),
+                plt.Line2D([], [], color=PRIMARY_INK, linewidth=1, linestyle="--", label="Baseline"),
+                plt.Line2D(
+                    [], [], linestyle="none", marker="o", markersize=7, color=PRIMARY_INK,
+                    label="Early stopping's pick",
+                ),
+            ],
+            loc="outside upper right",
+            ncols=4,
+            frameon=False,
+            fontsize=10,
+        )
+        plt.show()
+
+
 def plot_overfit_results(
     overfit: pd.DataFrame,
     r2_limits: tuple[float, float] = (-1, 1.05),

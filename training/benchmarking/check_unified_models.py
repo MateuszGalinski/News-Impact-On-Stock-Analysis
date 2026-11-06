@@ -23,6 +23,7 @@ from .data import (
     load_track_rows,
     prepare_dataset,
 )
+from .diagnostics import CURVE_MODELS, early_stopping_pick, learning_curves, summarize_curves
 from .experiment import ExperimentConfig, run_experiment
 from .models import UNIFIED_MODELS, UNIFIED_RECURRENT_PARAMS, UNIFIED_XGBOOST_PARAMS, ModelSpec, fit_model
 from .walk_forward import WalkForwardConfig, compare_tracks, run_walk_forward, walk_forward_intervals
@@ -235,6 +236,44 @@ def check_small_run():
     print("[PASS] a small walk-forward run works on the new track with the unified models")
 
 
+def check_learning_curves():
+    assert early_stopping_pick([5, 4, 3, 4, 4, 4, 1], patience=3) == 3, "stops before the later low"
+    assert early_stopping_pick([5, 4, 3, 4, 4, 1], patience=3) == 6
+    assert early_stopping_pick([3, 3, 3, 3], patience=2) == 1, "ties aren't improvements"
+
+    # Early stopping's real choice must match the pick calculated from a full curve.
+    dataset = prepare_dataset(NO_NEWS_WITH_FEATURES, common_dates=True, standardize=True, early_stopping_fraction=0.1)
+    for spec, patience in CURVE_MODELS:
+        params = {**spec.params, "epochs": 25} if spec.kind != "xgboost" else {**spec.params, "n_estimators": 150}
+        full = fit_model(replace(spec, params=params), dataset, 42)
+        pick = early_stopping_pick(full.curves[0]["stopping"], patience)
+        stopped_params = (
+            {**params, "early_stopping_patience": patience}
+            if spec.kind != "xgboost"
+            else {**params, "early_stopping_rounds": patience}
+        )
+        stopped = fit_model(replace(spec, params=stopped_params), dataset, 42)
+        assert len(full.curves[0]["stopping"]) == params.get("epochs", params.get("n_estimators"))
+        assert stopped.best_steps[0] == pick, (spec.name, stopped.best_steps[0], pick)
+        if pick < len(full.curves[0]["stopping"]) - patience:
+            assert stopped.steps_run[0] == pick + patience
+
+    short = tuple(
+        (replace(spec, params={**spec.params, "epochs": 3}), patience)
+        if spec.kind != "xgboost"
+        else (replace(spec, params={**spec.params, "n_estimators": 5}), patience)
+        for spec, patience in CURVE_MODELS
+    )
+    curves = learning_curves((NEWS_WITH_FEATURES_AND_TECH,), models=short, rounds=(1,), seeds=(42,))
+    assert set(curves["model"]) == {"RNN", "LSTM", "XGBoost"}
+    assert curves[curves["model"] == "XGBoost"]["step"].max() == 5
+    assert (curves["stopping_loss"] > 0).all() and (curves["train_loss"] > 0).all()
+    summary = summarize_curves(curves)
+    assert len(summary) == 3
+    assert (summary["stopping_best"] <= summary["stopping_final"]).all()
+    print("[PASS] curves record each step, and the pick matches early stopping's real choice")
+
+
 def main():
     check_new_track()
     check_stopping_slice_on_split()
@@ -243,6 +282,7 @@ def main():
     check_defaults_unchanged()
     check_comparisons()
     check_small_run()
+    check_learning_curves()
     print("\nALL CHECKS PASSED: the unified setup is ready")
 
 
