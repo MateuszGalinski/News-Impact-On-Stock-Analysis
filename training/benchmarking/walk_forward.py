@@ -16,6 +16,7 @@ from .data import (
     NEWS_WITH_FEATURES_AND_TECH,
     NO_NEWS_NO_FEATURES,
     NO_NEWS_WITH_FEATURES,
+    RANGE_TARGET,
     RETURN_TARGET,
     load_track_rows,
     prepare_walk_forward_round,
@@ -83,6 +84,12 @@ def _round_predictions(config, spec, seed, round_number, dataset) -> pd.DataFram
     fitted = fit_model(spec, dataset, seed)
     predicted = fitted.predict(dataset.test.X)
     known_targets = np.concatenate([dataset.train.y, dataset.validation.y])
+    extra = {}
+    if config.target == RANGE_TARGET:
+        # Converting a log forecast back needs the fit's error variance on known days.
+        known_inputs = np.concatenate([dataset.train.X, dataset.validation.X])
+        errors = known_targets - fitted.predict(known_inputs)
+        extra = {"known_error_variance": (errors**2).mean(axis=0)}
     frames = [
         pd.DataFrame(
             {
@@ -98,6 +105,7 @@ def _round_predictions(config, spec, seed, round_number, dataset) -> pd.DataFram
                 "baseline": known_targets[:, index].mean(),
                 "best_step": fitted.best_steps[index],
                 "steps_run": fitted.steps_run[index],
+                **{name: values[index] for name, values in extra.items()},
             }
         )
         for index, horizon in enumerate(config.horizons)

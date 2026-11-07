@@ -8,6 +8,7 @@ import numpy as np
 from .data import (
     MOVE_INPUT_COLUMN,
     NEWS_COLUMNS,
+    RANGE_INPUT_COLUMN,
     NEWS_WITH_FEATURES,
     NO_NEWS_NO_FEATURES,
     NO_NEWS_WITH_FEATURES,
@@ -92,8 +93,12 @@ HAR_DAYS = (1, 5, 22)
 
 
 def _har_inputs(spec: ModelSpec, X: np.ndarray, feature_columns: tuple[str, ...]) -> np.ndarray:
-    """Return the average move over the last 1, 5 and 22 days (Corsi, 2009)."""
-    moves = X[:, :, feature_columns.index(MOVE_INPUT_COLUMN)]
+    """Return the average move over the last 1, 5 and 22 days (Corsi, 2009).
+
+    Uses the range target's log variance when it's an input, which makes this log-HAR.
+    """
+    column = RANGE_INPUT_COLUMN if RANGE_INPUT_COLUMN in feature_columns else MOVE_INPUT_COLUMN
+    moves = X[:, :, feature_columns.index(column)]
     inputs = [moves[:, -days:].mean(axis=1) for days in HAR_DAYS]
     if spec.params.get("news", False):
         inputs += [X[:, -1, i] for i, column in enumerate(feature_columns) if column in NEWS_COLUMNS]

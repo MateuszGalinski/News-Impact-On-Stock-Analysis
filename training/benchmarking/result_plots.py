@@ -311,15 +311,22 @@ def plot_walk_forward_rounds(round_metrics: pd.DataFrame, title: str = "Walk-for
         plt.show()
 
 
+MOVE_INTERVAL_METRICS = (
+    ("oos_r2", "Out-of-sample R² (0 = train mean)"),
+    ("rank_correlation", "Rank correlation with actual moves"),
+)
+
+
 def plot_move_intervals(
     intervals: pd.DataFrame,
     title: str = "Move size: all scored days",
     r2_limits: tuple[float, float] | None = None,
+    metrics: tuple = MOVE_INTERVAL_METRICS,
 ) -> None:
     """Plot `move_intervals`, with a 95% interval around each estimate.
 
-    The top row shows out-of-sample R² against the train mean, and the bottom
-    row shows rank correlation with actual moves. The dashed lines mark HAR, the
+    Each row shows one of `metrics`, by default out-of-sample R² against the
+    train mean and rank correlation with actual moves. The dashed lines mark HAR, the
     main baseline, so a model has to be right of them to beat it. With
     `r2_limits`, an R² below the limit gets a label with its value in place of a dot.
     """
@@ -329,7 +336,7 @@ def plot_move_intervals(
         for column, track in zip(axes.T, tracks):
             rows = intervals[intervals["track"] == track]
             models = list(rows["model"])
-            for ax, metric, color in ((column[0], "oos_r2", ACTUAL_COLOR), (column[1], "rank_correlation", FITTED_COLOR)):
+            for ax, (metric, _), color in zip(column, metrics, (ACTUAL_COLOR, FITTED_COLOR)):
                 for y, row in enumerate(rows.to_dict("records")):
                     ax.plot([row[f"{metric}_lower"], row[f"{metric}_upper"]], [y, y], color=color, linewidth=2, zorder=2)
                     ax.scatter(row[metric], y, s=56, color=color, edgecolors=SURFACE_COLOR, linewidths=1, zorder=3)
@@ -337,15 +344,16 @@ def plot_move_intervals(
                 ax.axvline(har[metric], color=PRIMARY_INK, linewidth=1, linestyle="--", zorder=1)
             if r2_limits is not None:
                 column[0].set_xlim(*r2_limits)
+                first = metrics[0][0]
                 for y, row in enumerate(rows.to_dict("records")):
-                    if row["oos_r2"] < r2_limits[0]:
+                    if row[first] < r2_limits[0]:
                         column[0].annotate(
-                            f"\u2190 {row['oos_r2']:.2f}", (r2_limits[0], y), xytext=(4, 0), textcoords="offset points",
+                            f"\u2190 {row[first]:.2f}", (r2_limits[0], y), xytext=(4, 0), textcoords="offset points",
                             va="center", fontsize=9, color=SECONDARY_INK,
                         )
             column[0].set_title(TRACK_TITLES.get(track, track), loc="left", fontsize=11)
-            column[0].set_xlabel("Out-of-sample R² (0 = train mean)")
-            column[1].set_xlabel("Rank correlation with actual moves")
+            for ax, (_, label) in zip(column, metrics):
+                ax.set_xlabel(label)
 
         fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
         fig.legend(
@@ -358,7 +366,16 @@ def plot_move_intervals(
         plt.show()
 
 
-def plot_move_comparisons(comparisons: pd.DataFrame, column: str, title: str) -> None:
+MOVE_COMPARISON_METRICS = (
+    ("mse_improvement", 1e4, "MSE improvement × 10,000"),
+    ("mae_improvement", 1e4, "MAE improvement × 10,000"),
+    ("rank_gain", 1, "Rank correlation gain"),
+)
+
+
+def plot_move_comparisons(
+    comparisons: pd.DataFrame, column: str, title: str, metrics: tuple = MOVE_COMPARISON_METRICS
+) -> None:
     """Plot `compare_moves` rows, with one panel per value of `column` and a 95% interval.
 
     Right of zero favors the first set of predictions named in the comparison.
@@ -367,16 +384,14 @@ def plot_move_comparisons(comparisons: pd.DataFrame, column: str, title: str) ->
     panels = list(comparisons[column].unique())
     with plt.rc_context(CHART_STYLE):
         fig, axes = plt.subplots(
-            3, len(panels), figsize=(max(13, 4 * len(panels)), 8.4), sharex="row", squeeze=False, layout="constrained"
+            len(metrics), len(panels), figsize=(max(13, 4 * len(panels)), 2.8 * len(metrics)), sharex="row",
+            squeeze=False, layout="constrained",
         )
         for panel_axes, panel in zip(axes.T, panels):
             rows = comparisons[comparisons[column] == panel]
             models = list(rows["model"])
-            for ax, metric, scale, color, label in (
-                (panel_axes[0], "mse_improvement", 1e4, ACTUAL_COLOR, "MSE improvement × 10,000"),
-                (panel_axes[1], "mae_improvement", 1e4, ACTUAL_COLOR, "MAE improvement × 10,000"),
-                (panel_axes[2], "rank_gain", 1, FITTED_COLOR, "Rank correlation gain"),
-            ):
+            for index, (ax, (metric, scale, label)) in enumerate(zip(panel_axes, metrics)):
+                color = FITTED_COLOR if index == len(metrics) - 1 else ACTUAL_COLOR
                 for y, row in enumerate(rows.to_dict("records")):
                     ax.plot(
                         [scale * row[f"{metric}_lower"], scale * row[f"{metric}_upper"]],
@@ -424,6 +439,32 @@ def plot_move_predictions(predictions: pd.DataFrame, models: dict, zoom_days: in
         fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
         handles, labels = axes[0].get_legend_handles_labels()
         fig.legend(handles, labels, loc="upper right", ncols=len(labels), frameon=False, fontsize=10)
+        plt.show()
+
+
+def plot_price_bands(bands: pd.DataFrame, label: str, days: int | None = None, title: str = "Price bands") -> None:
+    """Plot the real close against a model's 95% band and the train-mean band.
+
+    `bands` comes from `price_bands`. Dots mark days when the close fell outside
+    the model's band. With `days`, only the last that many scored days are shown.
+    """
+    rows = bands.sort_values("day")
+    rows = rows if days is None else rows.iloc[-days:]
+    misses = rows[~rows["covered"]]
+    with plt.rc_context(CHART_STYLE):
+        fig, ax = plt.subplots(figsize=(13, 5.2), layout="constrained")
+        ax.fill_between(rows["day"], rows["lower"], rows["upper"], color=FITTED_COLOR, alpha=0.22, linewidth=0, label=f"{label}, 95% band")
+        ax.plot(rows["day"], rows["baseline_lower"], color=SECONDARY_INK, linewidth=0.9, linestyle="--", label="Train-mean band")
+        ax.plot(rows["day"], rows["baseline_upper"], color=SECONDARY_INK, linewidth=0.9, linestyle="--")
+        ax.plot(rows["day"], rows["close"], color=ACTUAL_COLOR, linewidth=1.3, label="Actual close")
+        ax.scatter(misses["day"], misses["close"], s=22, color=PRIMARY_INK, zorder=4, label="Outside the model's band")
+        ax.set_ylabel("Price (split-adjusted)")
+        ax.grid(axis="y", color=GRID_COLOR, linewidth=0.6)
+        ax.set_axisbelow(True)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.tick_params(length=0, labelsize=9)
+        fig.suptitle(title, x=0.01, ha="left", fontsize=13, color=PRIMARY_INK)
+        fig.legend(loc="outside lower center", ncols=4, frameon=False, fontsize=10)
         plt.show()
 
 

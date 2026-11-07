@@ -1,17 +1,112 @@
 # Roadmap
 
-Agreed plan as of 2026-11-06. Steps 1, 2 and 3a are built and have been run. Step 3c is in progress. Steps 3b, 4 and 5 haven't started.
+Agreed plan as of 2026-11-07. The baseline work (steps 1, 2, 3a, 3c and 3d, recorded under "Completed work") is finished. The next step is A, then B. Nothing in steps B to G has been built yet.
 
-**Project aim:** show how unstructured data (news) can be combined with structured data (prices), and how well RAG suits that task.
+**Project aim:** develop and empirically verify a method for combining structured data (prices) with unstructured data (news articles) that respects time, so that no information from the future leaks in. The method is a Time-Aware RAG, which only lets the model use information that was available at each point in time. The domain is market trend prediction for NVDA, from daily prices and financial articles.
 
-**Starting point:** Phase 2 in `training/benchmarking/notebooks/model_comparison.ipynb`, which uses common dates and standardization. It fixed training, but no model has a dependable edge over the baseline on validation. Phases 1 and 2 stay in the notebook as the record.
+**What the baseline is for:** the completed work shows that no model beats simple baselines on next-day NVDA returns, which matches the literature. That's the honest context for the thesis, not a problem to fix first. The project needs a fair baseline, not a strong one: built without leakage, scored on the same days, and different only in the input being tested. A finding such as "once leakage is controlled, news adds little or nothing" is a valid result.
 
 **Rules for every step:**
 
 - Keep the test split locked until the final comparison, and use it once.
 - Fix the options to compare before seeing results, and report all of them.
-- Judge directional accuracy against always-up, and MSE and MAE against the train-mean baseline.
+- Judge directional accuracy against always-up, and MSE and R² against the train mean.
 - Preserve the one-day news shift and the after-close roll, which prevent look-ahead leakage.
+- Ask before any step that costs money (LLM or embedding calls), with a cost estimate first. Don't fetch new data unless explicitly asked.
+
+## A. Frozen protocol
+
+Fixed on 2026-11-07, before any results. Every comparison in steps B to G uses it.
+
+- **Target:** next-day `LOG_CLOSE_RETURN`, with a 30-day window.
+- **Evaluation:** walk-forward, 8 rounds, 781 scored days (2022-05-25 to 2025-07-08), common dates and standardization, using the first 90% of rows only. The 80/10/10 split is a second view. The test split is used once, in step G.
+- **Models:**
+  - RNN.
+  - LSTM | Dropout 0.5.
+  - XGBoost | Stronger, with a patience of 30.
+  - Ridge, a linear regression on the same flattened windows. It shows whether the nonlinear models add anything over a straight line.
+  - 3 seeds (42, 43, 44), averaged day by day. Ridge has no randomness.
+- **References:** the train mean, and always-up for direction.
+- **Metrics, all with stationary block-bootstrap intervals:**
+  - MSE.
+  - R² against the train mean.
+  - Directional accuracy, reported as the gain over always-up.
+  - Correlation between prediction and actual.
+- **Decision rule:** a variant improves on what it's compared with if, for the same model on the same days, its directional-accuracy gain has a 95% interval above zero and MSE isn't clearly worse. R² and correlation are reported for every comparison but don't decide. A clear correlation gain without a direction gain is reported as a weaker sign, not a win.
+- **Plots, one per cell:**
+  - Predicted against actual over time, for all scored days and the last 120.
+  - A scatter of predicted against actual.
+
+  Expect nearly flat predictions against noisy actual returns. That's the honest picture.
+
+**The comparisons the rule decides, fixed in advance:**
+
+1. Simple news features vs no news: does news help at all?
+2. Time-aware RAG vs no news, and vs simple news features: does RAG add anything?
+3. Naive RAG vs time-aware RAG: here a better naive score isn't an improvement. It measures how much leakage inflates results.
+
+## B. Reference run (no API cost)
+
+Run the frozen models on the 4 existing input sets: no news, no news with indicators, news, and news with indicators. This needs Ridge added to `models.py`, and the four metrics and plots in one notebook. The result is the table every RAG variant is compared against.
+
+## C. News data audit (no API cost)
+
+- **Coverage:** the cache has 653 scored days against 1,536 trading days, so at most about 43% are covered. Daily article counts cap at 25, with a median of 23, which suggests capped results bunched on certain days.
+- **Other sources:** check whether the Alpaca and other local news data fill the gaps.
+- **Timestamps:** check that publish times are reliable enough for a hard time filter, since the whole method depends on them.
+
+## D. Time-aware RAG (`news_features_from_rag`)
+
+**What it adds:** today the LLM sees only one day's articles. With RAG, the query for day t also retrieves relevant older articles from everything published up to t, such as earlier coverage of the same product, lawsuit or earnings. That gives the LLM context it doesn't have now.
+
+- **Index:** the existing GNews articles, embedded once. Each article keeps its timestamp, and its `trading_day` after the existing after-close roll.
+- **Retrieval for day t:** a hard filter only allows articles available by the same cutoff the current news features use, so the one-day shift is preserved. The score is relevance weighted by recency, which is the time-aware part. Consider combining embeddings with keyword search.
+- **LLM step:** the same output schema as the current news features, so only the context changes.
+- **Cache:** keyed by date and variant, plus a hash of the prompt and model. The current cache is keyed by date alone and silently reuses stale rows.
+- **Saved evidence:** store the retrieved articles for each day, so every prediction can be traced to its sources.
+- **Checks, like `check_walk_forward`:** no retrieved article is ever after its cutoff, and changing future articles must not change any earlier feature.
+- **Pilot first:** a sample of days to measure retrieval quality and the real cost per day, before the full run.
+- **Optional control:** an LLM that sees all articles from a 5-day window, with no retrieval. It shows whether RAG adds anything beyond giving the model more context. Decide after the pilot, since it costs LLM calls too.
+
+## E. Naive RAG: the leakage demonstration
+
+The same pipeline as D with the time filter removed, so day t can retrieve articles from later dates. It's scored on the same days and clearly labelled as leaky. If it looks clearly better than time-aware RAG, that's direct evidence for the topic's central claim, that temporal control is needed.
+
+## F. Leakage through the LLM's own memory
+
+GPT already knows how NVDA did after each date, so even perfectly filtered retrieval can leak through the model itself (look-ahead bias, studied for GPT sentiment scores by Glasserman & Lin, 2023). On a sample of days, re-score with the company name and dates hidden, and compare with the normal scores. If the named version lines up much better with later returns, the model is using hindsight. Also look at any days after the model's knowledge cutoff.
+
+## G. Final comparison and the locked test
+
+All variants on the same 781 walk-forward days, then one run on the locked test split for the frozen models and chosen variants, reported whatever it shows.
+
+| Question | How to measure it |
+|---|---|
+| Do the features improve prediction? | The decision rule in A, with all four metrics reported |
+| How much does leakage inflate results? | Naive vs time-aware RAG (E), and named vs hidden company (F) |
+| Does retrieval find the right articles? | Precision against about 50 hand-labelled days, and whether earnings days are found |
+| Do the features reflect real events? | Match with known events |
+| Is it practical? | Cost per day, and whether a prediction can be traced to its articles |
+
+"Time-aware RAG adds traceability and removes leakage but no predictive edge" is a legitimate finding.
+
+## Open questions
+
+1. What's the API budget? It sets how much of D to F can run. The pilot in D will give a real cost per day.
+2. Which research paper does the shape-based approach copy? Only needed if shape-based RAG is picked up later.
+
+## Later, if useful
+
+- **Range-based volatility with news (3d, steps 2-3):** the only target where prices clearly carry signal. Add the news features and an earnings-date flag. Set aside on 2026-11-07.
+- **Feature composition test (3b):** which news feature groups matter, with a shuffled-news placebo.
+- **5-day horizons (3c, stage 2).**
+- **Pretraining on other companies (former step 4):** fit an LSTM on other semiconductor companies, then fine-tune on NVDA. Pretraining only earns its place if the fine-tuned model beats both NVDA-only versions, with the other companies' data ending before NVDA's scored period in each round. Other companies' news needs new LLM calls and a cache keyed by company as well as date.
+- **Shape-based RAG (`news_shaped_based_rag`):** retrieve similar past 30-day return patterns, first by shape only (free, a control), then with the news from around those dates.
+- **Transformers,** from `notes.txt`. They answer a different question from the one this plan tests.
+
+# Completed work
+
+The baseline steps, kept as the record. They were run before the plan above, so their models and metrics differ slightly from step A.
 
 ## 1. Walk-forward evaluation
 
@@ -57,7 +152,7 @@ No API cost.
 
 ## 3. A stronger baseline
 
-The learning curves show overfitting, so this step controls that first, then tests which news features matter. The winner becomes the control for RAG.
+The learning curves showed overfitting, so this step tried to control it, then moved on to other targets.
 
 ### 3a. Regularization test
 
@@ -78,7 +173,7 @@ Real progress means correlation clearly above zero, an R² interval reaching or 
 **Result (2026-11-06):** no candidate met the criteria, so there's no winner and no 5-seed rerun. On walk-forward, no seed of any of the 60 setups (including controls) beat the train-mean baseline on MSE, and every setup averaged below always-up (54.9%) on direction.
 
 - **Better scores came from flatter predictions:** across the 60 setups, narrower predictions go with better R² (rank correlation -0.91). 17 of the 48 comparisons with the control improve MSE, but that's the kind of gain the criteria rule out.
-- **Stronger XGBoost:** it has the best R², -0.0006 (95% interval -0.0043 to 0.0031) with no news and no features, but it's close to predicting the mean. Its spread is 0.05 of actual, about 92% of its predictions are up, and its correlation is at or below zero. That makes it a weak tool for testing features in 3b. Its patience stopped it early, but the rerun below shows longer patience is worse.
+- **Stronger XGBoost:** it has the best R², -0.0006 (95% interval -0.0043 to 0.0031) with no news and no features, but it's close to predicting the mean. Its spread is 0.05 of actual, about 92% of its predictions are up, and its correlation is at or below zero. That makes it a weak tool for testing features in a feature test. Its patience stopped it early, but the rerun below shows longer patience is worse.
 - **Depth:** the 2-layer LSTM didn't help, and was much worse on no news with indicators, at -0.123 (-0.246 to -0.035).
 - **A weak lead in the RNNs:** 9 of 60 correlation intervals are above zero, and all 9 are RNNs. The best control is no news with indicators, at 0.087 (0.021 to 0.156). It's positive in all 8 rounds and doesn't depend on the largest moves. Its R² is still -0.047, partly because its predictions are too wide, and it was picked from 60 setups. Shrinking its predictions by the best amount in hindsight gives an R² of about +0.008, which isn't a fair result.
 - **News vs no news:** in the 15 comparisons, news was never better on MSE or direction. It was worse on MSE in 7 (5 RNN, 2 LSTM) and on direction in 1. With these 3 seeds, the RNN control's MSE and the XGBoost control's direction are worse with news, but both intervals included zero with 5 seeds, so individual results depend on the seeds.
@@ -96,20 +191,6 @@ Real progress means correlation clearly above zero, an R² interval reaching or 
 - **Stopping-slice gains didn't carry over:** rounds 4 and 8 trained for the most extra trees, but got worse on scored days. Round 4's R² goes from 0.0002 to -0.027, and round 8's from -0.019 to -0.050.
 - **80/10/10:** both settings pick the same trees in all 12 fits, so this split can't separate them.
 
-### 3b. Feature composition test
-
-A separate test, run after 3a on the best stable setup, using the cached news features with no LLM reruns. It replaces testing one hand-picked subset of features, which could give a false positive or a false negative and wrongly close the question.
-
-| Part | What it tests |
-|---|---|
-| Each feature group alone | Whether a group carries anything by itself |
-| All news minus one group | Whether removing a group changes anything |
-| Shuffled news (placebo) | What chance looks like. Real news must clearly beat it before any feature finding is believed |
-
-- **Groups, fixed before seeing results:** sentiment (mean, confidence, disagreement), event importance (materiality, surprise, guidance change), and news volume (article count).
-- **Also consider:** the LLM's event type and time horizon fields, which the models don't use yet. Check that they're in the cache first.
-- **Last-day news:** test it here too, as an alternative to the full window.
-- **A negative result** applies only to these features, target and models. It doesn't rule out better news features, such as ones from RAG.
 
 ### 3c. Move-size and horizon tests
 
@@ -130,7 +211,7 @@ The questions, in order:
 2. **Does a trained model add anything?** Its MSE improvement over HAR must have an interval above zero, with MAE and rank correlation not clearly worse.
 3. **Does news help?** With the same model, news must beat no news on the same terms. HAR + news vs HAR is the simplest version of this test.
 
-If news wins, run a shuffled-news placebo and the news audit (5a) before trusting it. Article count could just reflect that big days attract more news, and the LLM may know how past events turned out.
+If news wins, run a shuffled-news placebo and the news audit (step C) before trusting it. Article count could just reflect that big days attract more news, and the LLM may know how past events turned out.
 
 **Stage 1 result (2026-11-06):** under the rules above, the test stops at question 1, and news shows no benefit.
 
@@ -143,86 +224,34 @@ If news wins, run a shuffled-news placebo and the news audit (5a) before trustin
 
 These news features end two days before the scored move's close, and don't include scheduled events such as earnings dates, so this doesn't rule out better news inputs.
 
-**Stage 2, 5-day horizons:** review stage 1 first. Then run 5-day move size, as the average daily move over the 5 days, and 5-day return, each on 749 scored days. Those days overlap, so they're worth only about 150 independent periods. A 20-day horizon was left out, because about 31 independent periods is too few.
+**Stage 2, 5-day horizons:** postponed on 2026-11-07, and only worth running if the range-based target in 3d works at 1 day. The plan was to run 5-day move size, as the average daily move over the 5 days, and 5-day return, each on 749 scored days. Those days overlap, so they're worth only about 150 independent periods. A 20-day horizon was left out, because about 31 independent periods is too few.
 
-## 4. Pretraining on other companies
+### 3d. Range-based volatility
 
-Fit an LSTM on other companies, then fine-tune it to predict NVDA. Start with no news and with features, which is free. Drop the no-features track for this test. Test news only if pretraining helps.
+Agreed on 2026-11-07, after a literature check. Change one thing at a time, so each result can be traced to its cause.
 
-Compare on the same NVDA walk-forward days:
+**What the literature says:**
 
-| Version | Trains on | What it tells you |
-|---|---|---|
-| A. NVDA only, common dates | NVDA from 2020 | The main control |
-| B. NVDA only, full history | NVDA from 1999 | Whether more NVDA data is enough on its own |
-| C. Pretrained, no fine-tuning | Other companies only | Whether any general pattern carries over |
-| D. Pretrained and fine-tuned | Other companies, then NVDA | The idea being tested |
+- **Direction:** no credible study reliably predicts one stock's next-day direction or return from its own daily prices. Informal attempts like ours land at about chance. The successes use many stocks at once and rank them against each other, and their edge is small (for example Fischer & Krauss 2018, Gu, Kelly & Xiu 2020). Studies claiming 70-90% accuracy usually have a flaw such as look-ahead leakage.
+- **Volatility:** it is predictable, and machine learning often beats HAR (Christensen, Siggaard & Veliyev 2023). Those studies measure volatility from intraday prices, which is much less noisy than the absolute daily return we used in 3c. News helped volatility forecasts most on jump days (Rahimikia & Poon).
+- **How forecasts are judged:** with a noisy volatility measure, only some losses rank forecasts correctly. MSE and QLIKE are the standard ones (Patton 2011). Models are usually trained with MSE on the log of volatility, against a log-HAR baseline.
 
-**Decision rule:** pretraining earns its place only if D beats both A and B, with confidence intervals that support it.
+**Plan:** the range-based target first, then news on it, then many stocks. Only the first part was run before the project refocused on the RAG plan above.
 
-Rules to keep it fair:
+1. **Range-based target.** Free, and uses the existing pipeline and models.
+   - **Target:** the log of each day's range-based variance, using Garman–Klass plus the overnight gap, since earnings reactions mostly happen overnight. The open, high and low are already in the Stooq file.
+   - **Input:** each day's value of the same measure, in place of the absolute return.
+   - **Training:** unchanged, with MSE on the standardized target.
+   - **Baseline:** log-HAR, fitted on the 1, 5 and 22-day averages of the log measure.
+   - **Evaluation:** QLIKE and MSE, after converting forecasts back from logs to variance with a bias correction. Rank correlation is an extra check. MAE is dropped, because it isn't a robust loss for this.
+   - **Price bands:** turn each forecast into a band around that day's real close for the next day, as `close × exp(±1.96 × forecast σ)`, a standard 95% band. The band is centred on today's price, because the target has no direction. Returns have more extreme days than a normal distribution, so expect coverage somewhat below 95%. On the scored days, report coverage (how many next-day closes land inside, against 95%) and average width, and compare with a fixed-width band from the train mean. A better model reaches the same coverage with narrower bands. Also check whether misses cluster on earnings days, and plot the bands against the real price.
+   - **Question 1:** log-HAR must clearly beat the train mean, or news isn't tested on this target.
+   - **Rules, fixed on 2026-11-07 before any results:** `training/benchmarking/notebooks/range_volatility.ipynb`, with the same 6 models, 4 input sets, 3 seeds and both evaluations as 3c. The train mean is the average variance of the days known before each round. The bias correction uses each fit's mean squared error on its known days, on the log scale. "Clearly beats" means the QLIKE improvement interval is above zero, and MSE and rank correlation aren't clearly worse. That applies to question 1 (log-HAR vs the train mean), question 2 (a trained model vs log-HAR) and question 3 (news vs no news with the same model, and log-HAR + news vs log-HAR). Yesterday's value and the 5-day and 20-day averages of the variance are extra baselines. The price bands are descriptive and don't decide anything. Earnings dates aren't in the data, so the largest band misses are listed for checking by hand.
+   - **Results, run on 2026-11-07 (624 walk-forward fits, 78 on 80/10/10):**
+     - **Question 1: fails by the fixed rule.** Log-HAR's QLIKE improvement over the train mean is 0.066 (−0.066 to 0.181), and no model's interval is above zero. So news isn't tested on this target as it stands.
+     - **Why it fails is different from 3c.** Log-HAR ranks days well: rank correlation 0.52 (0.40 to 0.59), against 0.13 for move size. But 8 days (1%) make up 42% of its QLIKE, and the earnings jump on 2023-05-25 alone makes up about a quarter. Without those 8 days, log-HAR clearly beats the train mean on all three measures (QLIKE 0.107, 0.051 to 0.171). On the 80/10/10 validation days its QLIKE skill is 0.29 (0.04 to 0.50). At least 4 of the 8 days were earnings, which the inputs can't see coming.
+     - **Question 2: no.** No trained model clearly beats log-HAR. 3 of 24 are clearly worse on QLIKE, and 18 of 24 on rank correlation. On the 80/10/10 validation days (2025-01-08 to 2025-07-08), none clearly beats it on QLIKE, but LSTM and LSTM | Dropout 0.5 with no news and no features are clearly better on rank correlation (+0.057, 0.008 to 0.129, and +0.075, 0.019 to 0.158). Walk-forward on the same days shows the same, so the LSTMs caught up with log-HAR in 2025 after trailing it in 2022-2024. It's 2 of 24 comparisons in one period, so a hint only.
+     - **Question 3, shown but not a test: no sign news helps.** None of 13 is clearly better, and 3 are clearly worse on QLIKE. Log-HAR + news is level with log-HAR.
+     - **Price bands:** log-HAR covers 93.9% of next-day closes at an average width of 12.2% of the price, against 94.8% at 13.3% for the train mean. The largest misses are the same shock days.
 
-- **Time cutoff:** in each round, other companies' data must end before NVDA's scored period starts.
-- **Separate scaling:** standardize each company with its own pre-cutoff statistics.
-- **Companies fixed in advance:** semiconductors (AMD, AVGO, INTC, MU, QCOM, TSM), and maybe big tech as a second group. These all survived and mostly did well, so mention that bias in the write-up.
-- **One fine-tuning method:** a lower learning rate and early stopping on a separate slice, chosen before seeing results.
-
-If D wins, add news in this order:
-
-1. Pretrain the price LSTM on other companies, with prices only. Combine its output with NVDA's existing news features in a small network trained on NVDA. Compare D against D plus news. This needs no new API calls and is close to the "autoencoder plus LLM output" idea in `notes.txt`.
-2. Only if that shows promise, pretrain on other companies' news.
-
-Other companies' news needs code changes and API spend. LLM scores exist only for NVDA, the prompt is hardcoded to NVDA, and the cache is keyed by date alone, so it would wrongly reuse NVDA's scores. Raw news exists for Apple, Google, Microsoft, Tesla and CD Projekt. Scores may also carry over poorly between companies.
-
-## 5. Non-RAG control and RAG tracks
-
-### 5a. Audit the news data (no API cost)
-
-- **Coverage:** the cache has 653 scored days against 1,536 trading days, so at most about 43% are covered. Daily article counts cap at 25 with a median of 23, which suggests capped results bunched on certain days.
-- **Other sources:** check whether the Alpaca and other local news data fill the gaps. Don't fetch new data unless explicitly asked.
-- **Hindsight risk:** the LLM may already know how 2020-2025 events turned out. Compare scores with and without company names, and look at any period after the model's knowledge cutoff.
-
-### 5b. Non-RAG control
-
-Build the "per time frame" version from `README.md`, where the LLM sees all articles from a 5-day window. This shows whether RAG adds anything beyond giving the model more context.
-
-### 5c. `news_features_from_rag`
-
-- **Retrieval:** combine embeddings and keyword search. Only documents published before the prediction date can be retrieved, enforced by an automated test.
-- **Features:** use the same schema as the current news features, so the tracks compare directly.
-- **Comparisons:** fixed queries vs LLM-written queries, and today's news vs older context, which is RAG's real advantage over daily scoring.
-- **Saved evidence:** store the retrieved articles for each day, and include the model and prompt in the cache key.
-- **Pilot first:** try a sample of training days to measure quality and cost before running everything.
-
-### 5d. `news_shaped_based_rag`
-
-Retrieve similar past 30-day return patterns, in two stages:
-
-1. **Shape only:** use what followed those past patterns. This is free and acts as a control.
-2. **Shape plus news:** add the news from around those past dates.
-
-If stage 2 beats stage 1, that's direct evidence for combining the two data types.
-
-### 5e. Final comparison
-
-Run this once, then unlock the test split for the final results.
-
-| Question | How to measure it |
-|---|---|
-| Does retrieval find the right articles? | Precision against about 50 hand-labelled days, and whether earnings days are found |
-| Do the features reflect real events? | Match with known events, and link to the size of the next move |
-| Do the features improve prediction? | MSE and MAE against the baseline, direction against always-up, with confidence intervals |
-| Is it practical? | Cost per day, and whether a prediction can be traced to its articles |
-
-The project still has something to show if return prediction doesn't improve but RAG finds better evidence and detects events better. "RAG adds traceability but no predictive edge" is a legitimate finding.
-
-## Open questions
-
-1. Which research paper does the shape-based approach copy? Needed for 5d.
-2. What's the API budget? This sets how much of step 4's news work and step 5 can run. The pilot will give a real cost per day.
-3. Should move size be added as a second target? News may suit it better than direction. Direction and return prediction would stay as they are.
-
-## Later, if useful
-
-- Transformers, from `notes.txt`. They answer a different question from the one this plan tests.
-- More target companies, which could add a lot of statistical power.
+**Not done:** the overview chart shows QLIKE and rank correlation but not the MSE-based R², which is only in the tables. Add it if this target is picked up again.

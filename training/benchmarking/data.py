@@ -24,6 +24,12 @@ TARGET_COLUMN = "LOG_CLOSE_RETURN"
 RETURN_TARGET = "return"
 MOVE_SIZE_TARGET = "move_size"
 MOVE_INPUT_COLUMN = "ABS_LOG_RETURN"
+RANGE_TARGET = "range_volatility"
+RANGE_VARIANCE_COLUMN = "RANGE_VARIANCE"
+RANGE_INPUT_COLUMN = "RANGE_LOG_VARIANCE"
+TARGETS = (RETURN_TARGET, MOVE_SIZE_TARGET, RANGE_TARGET)
+# Guards the log against a day with no movement at all. None exists in the data.
+VARIANCE_FLOOR = 1e-8
 CYCLICAL_COLUMNS = ["sin_doy", "cos_doy", "sin_month", "cos_month", "sin_dow", "cos_dow"]
 TECHNICAL_COLUMNS = ["CLOSE_TO_TEMA_10", "EMA_5_20_SPREAD"]
 
@@ -82,6 +88,21 @@ def load_stock(path: Path = STOCK_PATH) -> pd.DataFrame:
     stock = stock.sort_values("DATE").reset_index(drop=True)
     stock[TARGET_COLUMN] = np.log(stock["CLOSE"] / stock["CLOSE"].shift(1))
     return stock
+
+
+def range_variance(stock: pd.DataFrame) -> pd.Series:
+    """Return each day's variance from its prices, as the overnight gap plus Garman–Klass.
+
+    The overnight gap is the squared log change from the previous close to the
+    open. Garman–Klass (1980) estimates the variance during trading hours from
+    the open, high, low and close. Both are squared, so the result has no direction.
+    """
+    previous_close = stock["CLOSE"].shift(1)
+    overnight = np.log(stock["OPEN"] / previous_close) ** 2
+    intraday = 0.5 * np.log(stock["HIGH"] / stock["LOW"]) ** 2 - (2 * np.log(2) - 1) * np.log(
+        stock["CLOSE"] / stock["OPEN"]
+    ) ** 2
+    return (overnight + intraday).clip(lower=VARIANCE_FLOOR)
 
 
 def add_technical_features(stock: pd.DataFrame) -> pd.DataFrame:
@@ -235,14 +256,23 @@ def load_track_rows(
     common_dates limits the track to the news track's dates, after indicators
     have been calculated on the full price history.
     target: the move-size target adds each day's move as an input, so models
-    don't have to work it out from signed returns.
+    don't have to work it out from signed returns. The range target adds each
+    day's variance and its log, calculated on the full price history first.
     """
+    if target not in TARGETS:
+        raise ValueError(f"Unknown target {target!r}, expected one of {TARGETS}")
     frame, features, scaled = build_track_frame(track)
     if common_dates and track not in (NEWS_WITH_FEATURES, NEWS_WITH_FEATURES_AND_TECH):
         frame = _restrict_to_news_dates(frame)
     if target == MOVE_SIZE_TARGET:
         frame = frame.assign(**{MOVE_INPUT_COLUMN: frame[TARGET_COLUMN].abs()})
         features = [TARGET_COLUMN, MOVE_INPUT_COLUMN, *features[1:]]
+    elif target == RANGE_TARGET:
+        stock = load_stock()
+        variance = range_variance(stock).set_axis(stock["DATE"])
+        frame = frame.assign(**{RANGE_VARIANCE_COLUMN: frame["DATE"].map(variance).to_numpy()})
+        frame[RANGE_INPUT_COLUMN] = np.log(frame[RANGE_VARIANCE_COLUMN])
+        features = [TARGET_COLUMN, RANGE_INPUT_COLUMN, *features[1:]]
     return frame, features, scaled
 
 
@@ -280,14 +310,16 @@ def make_windows(
 
     Each target covers the `horizon` days right after the window. By default it's
     the summed log return. With the move-size target it's the average daily move,
-    because summing first would let an up day and a down day cancel out.
+    because summing first would let an up day and a down day cancel out. With
+    the range target it's the log of the average daily variance.
     Windows never cross a split, so training targets can't use prices from
     validation or test, and every horizon shares the same rows.
     """
-    if target not in (RETURN_TARGET, MOVE_SIZE_TARGET):
+    if target not in TARGETS:
         raise ValueError(f"Unknown target {target!r}")
     values = frame[feature_columns].to_numpy()
     returns = frame[TARGET_COLUMN].to_numpy()
+    variances = frame[RANGE_VARIANCE_COLUMN].to_numpy() if target == RANGE_TARGET else None
     dates = frame["DATE"].to_numpy()
 
     sample_count = len(frame) - window_days - max(horizons) + 1
@@ -304,6 +336,8 @@ def make_windows(
                 returns[start + window_days:start + window_days + horizon].sum()
                 if target == RETURN_TARGET
                 else np.abs(returns[start + window_days:start + window_days + horizon]).mean()
+                if target == MOVE_SIZE_TARGET
+                else np.log(variances[start + window_days:start + window_days + horizon].mean())
                 for horizon in horizons
             ]
             for start in range(sample_count)
